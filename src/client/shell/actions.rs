@@ -185,6 +185,26 @@ impl ClientShellState {
                 if self.handle_endpoint_navigation(action, outcome) {
                     return;
                 }
+                // A plugin pane that draws a section owns the order of its rows.
+                let step = match action {
+                    crate::input::KeybindAction::NextWorkspace => {
+                        Some((SidebarSection::Spaces, true))
+                    }
+                    crate::input::KeybindAction::PreviousWorkspace => {
+                        Some((SidebarSection::Spaces, false))
+                    }
+                    crate::input::KeybindAction::NextAgent => Some((SidebarSection::Agents, true)),
+                    crate::input::KeybindAction::PreviousAgent => {
+                        Some((SidebarSection::Agents, false))
+                    }
+                    _ => None,
+                };
+                if step.is_some_and(|(section, forward)| {
+                    self.sidebar_plugins
+                        .step(section, forward, std::time::Instant::now())
+                }) {
+                    return;
+                }
                 if let Some(method) = self.endpoint_method_for_action(action) {
                     self.push_endpoint_method(method, outcome);
                     return;

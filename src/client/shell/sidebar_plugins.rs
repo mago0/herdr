@@ -36,6 +36,10 @@ pub(super) const LABEL_TOKEN: &str = "label";
 pub(super) const LABEL_TOKEN_SOURCE: &str = "tree";
 /// How long a right-click waits for the plugin pane to name its row.
 const MENU_REPLY_WINDOW: Duration = Duration::from_secs(1);
+/// The step a plugin pane reads as "focus the next row" and "focus the previous row": the keys
+/// F20 and F19, which no keybinding of the sidebar uses.
+const STEP_NEXT: &[u8] = b"\x1b[19;2~";
+const STEP_PREVIOUS: &[u8] = b"\x1b[18;2~";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SidebarSection {
@@ -466,6 +470,20 @@ impl SidebarPlugins {
     /// The menu a plugin pane asked for since the last call.
     pub(super) fn take_menu_request(&mut self) -> Option<SidebarMenuRequest> {
         self.menu_request.take()
+    }
+
+    /// Tell the plugin pane of `section` to move the focus one row down or up its own order.
+    /// The pane does not get the keys. Returns false when the section is native.
+    pub(super) fn step(&self, section: SidebarSection, forward: bool, now: Instant) -> bool {
+        let Some(pane) = self.slots[section.index()].pane.as_ref() else {
+            return false;
+        };
+        let bytes = if forward { STEP_NEXT } else { STEP_PREVIOUS };
+        let _ = pane
+            .runtime
+            .try_send_bytes(bytes::Bytes::from_static(bytes));
+        self.input_echo_until.set(Some(now + INPUT_ECHO_WINDOW));
+        true
     }
 
     /// Send a key to the focused plugin pane. Returns false when no plugin pane has the keys.

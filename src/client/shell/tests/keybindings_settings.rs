@@ -1235,3 +1235,70 @@ async fn sidebar_plugin_row_menu_has_no_label_item_without_an_agent_pane() {
         other => panic!("context menu, got {other:?}"),
     }
 }
+
+/// Prints the name of each step sequence it reads.
+const STEP_ECHO_PLUGIN: &str = "stty raw -echo; printf 'READY'; buf=; while :; do c=$(dd bs=1 count=1 2>/dev/null); buf=\"$buf$c\"; case \"$buf\" in *'[19;2~') printf '\r\nNEXT'; buf=;; *'[18;2~') printf '\r\nBACK'; buf=;; esac; done";
+
+fn bound_action(
+    state: &mut ClientShellState,
+    action: crate::input::KeybindAction,
+) -> ClientShellInput {
+    let mut outcome = ClientShellInput::default();
+    state.record_binding(crate::input::KeybindMatch::Action(action), &mut outcome);
+    outcome
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sidebar_plugin_for_spaces_takes_the_workspace_steps() {
+    use crate::input::KeybindAction;
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = "fake:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_sidebar_plugin_resolver(fake_sidebar_plugin(STEP_ECHO_PLUGIN));
+    state.set_snapshot(Box::new(snapshot()));
+    sidebar_text_when(&mut state, |text| text.contains("READY")).await;
+
+    let next = bound_action(&mut state, KeybindAction::NextWorkspace);
+    assert!(next.actions.is_empty(), "the plugin owns the order");
+    let text = sidebar_text_when(&mut state, |text| text.contains("NEXT")).await;
+    assert!(text.contains("NEXT"), "{text}");
+
+    let previous = bound_action(&mut state, KeybindAction::PreviousWorkspace);
+    assert!(previous.actions.is_empty(), "the plugin owns the order");
+    let text = sidebar_text_when(&mut state, |text| text.contains("BACK")).await;
+    assert!(text.contains("BACK"), "{text}");
+    assert_eq!(state.sidebar_plugins.focus(), None);
+
+    // The agents section is native, so its steps keep the native order.
+    let agent = bound_action(&mut state, KeybindAction::NextAgent);
+    assert!(!agent.actions.is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sidebar_plugin_for_agents_takes_the_agent_steps_and_leaves_the_workspace_steps() {
+    use crate::input::KeybindAction;
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = String::new();
+    config.ui.sidebar.agents.plugin = "fake:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_sidebar_plugin_resolver(fake_sidebar_plugin(STEP_ECHO_PLUGIN));
+    state.set_snapshot(Box::new(snapshot()));
+    sidebar_text_when(&mut state, |text| text.contains("READY")).await;
+
+    let workspace = bound_action(&mut state, KeybindAction::NextWorkspace);
+    assert!(matches!(
+        &workspace.actions[..],
+        [ClientShellAction::Endpoint { request, .. }]
+            if matches!(
+                &request.method,
+                crate::api::schema::Method::WorkspaceFocus(target)
+                    if target.workspace_id == "ws_1"
+            )
+    ));
+
+    let agent = bound_action(&mut state, KeybindAction::PreviousAgent);
+    assert!(agent.actions.is_empty(), "the plugin owns the order");
+    let text = sidebar_text_when(&mut state, |text| text.contains("BACK")).await;
+    assert!(text.contains("BACK"), "{text}");
+    assert!(!text.contains("NEXT"), "{text}");
+}
