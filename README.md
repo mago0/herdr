@@ -39,6 +39,24 @@ https://github.com/user-attachments/assets/043ec09f-4bdd-41d5-aee0-8fda6b83e267
 
 ---
 
+## creed
+
+> This is my herdr. There are many like it, but this one is mine.
+>
+> My herdr is my best friend. It is my life. I must master it as I must master my life.
+>
+> Without me, my herdr is useless. Without my herdr, I am useless. I must dispatch my agents true. I must ship straighter than the backlog that is trying to bury me. I must close the ticket before it closes me. I will...
+>
+> My herdr and I know that what counts in this work is not the panes we open, the tokens we burn, nor the noise of our scrollback. We know that it is the merges that count. We will merge...
+>
+> My herdr is human, even as I, because it is my life. Thus, I will learn it as a brother. I will learn its weaknesses, its strength, its panes, its tabs, its workspaces and its worktrees. I will keep my herdr clean and rebased, even as I am clean and rebased. We will become part of each other. We will...
+>
+> Before Git, I swear this creed. My herdr and I are the defenders of my main branch. We are the masters of our agents. We are the saviors of my on-call.
+>
+> So be it, until the backlog is empty and there is no ticket, but peace!
+
+---
+
 ## install
 
 ```bash
