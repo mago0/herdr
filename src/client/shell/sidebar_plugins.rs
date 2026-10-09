@@ -27,6 +27,8 @@ const SCROLLBACK_LIMIT_BYTES: usize = 64 * 1024;
 /// How long the client polls a plugin pane at a short interval after it sent input to it.
 const INPUT_ECHO_WINDOW: Duration = Duration::from_millis(400);
 const INPUT_ECHO_POLL: Duration = Duration::from_millis(16);
+/// How often the program file of a plugin pane is checked for a new build.
+const PROGRAM_CHECK: Duration = Duration::from_millis(500);
 /// Start of the terminal title a plugin pane sets to name the row under a right-click.
 const MENU_TITLE_PREFIX: &str = "herdr-menu;";
 /// How long a right-click waits for the plugin pane to name its row.
@@ -76,6 +78,55 @@ struct Pane {
     started: Instant,
     /// The last terminal title read, so a menu request is taken once.
     title: Option<String>,
+    program: Option<Program>,
+}
+
+/// The program file of a plugin pane. A new build of it starts the pane again.
+struct Program {
+    path: PathBuf,
+    started_with: Option<std::time::SystemTime>,
+    /// A changed time seen once. The pane starts again when the next check sees the same time,
+    /// so a file that is still being written is left alone.
+    changed_to: Option<std::time::SystemTime>,
+    checked: Instant,
+}
+
+impl Program {
+    /// `None` for a command found through `PATH`, which is not watched.
+    fn of(command: &SidebarPluginCommand, now: Instant) -> Option<Self> {
+        let first = command.argv.first().filter(|first| first.contains('/'))?;
+        let path = command.cwd.join(first);
+        Some(Self {
+            started_with: modified(&path),
+            path,
+            changed_to: None,
+            checked: now,
+        })
+    }
+
+    /// True when the file has a new build that is complete.
+    fn rebuilt(&mut self, now: Instant) -> bool {
+        if now.saturating_duration_since(self.checked) < PROGRAM_CHECK {
+            return false;
+        }
+        self.checked = now;
+        let Some(current) = modified(&self.path).filter(|time| Some(*time) != self.started_with)
+        else {
+            self.changed_to = None;
+            return false;
+        };
+        if self.changed_to == Some(current) {
+            return true;
+        }
+        self.changed_to = Some(current);
+        false
+    }
+}
+
+fn modified(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
 }
 
 /// What a plugin row stands for, as named by its pane after a right-click.
@@ -247,6 +298,14 @@ impl SidebarPlugins {
                     slot.quick_exits = 0;
                 }
                 slot.pane = None;
+                repaint = true;
+            } else if pane
+                .program
+                .as_mut()
+                .is_some_and(|program| program.rebuilt(now))
+            {
+                slot.pane = None;
+                slot.quick_exits = 0;
                 repaint = true;
             } else if pane.runtime.content_seq() != pane.drawn_seq {
                 repaint = true;
@@ -453,6 +512,7 @@ fn spawn(spec: &str, command: &SidebarPluginCommand, rect: Rect) -> Option<Pane>
             drawn_seq: 0,
             started: Instant::now(),
             title: None,
+            program: Program::of(command, Instant::now()),
         }),
         Err(error) => {
             tracing::warn!(spec, %error, "sidebar plugin pane did not start");

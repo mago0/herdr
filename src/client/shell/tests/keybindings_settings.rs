@@ -1108,3 +1108,52 @@ async fn sidebar_plugin_menu_title_without_a_right_click_opens_nothing() {
     state.tick_sidebar_plugins(std::time::Instant::now());
     assert!(state.overlay.is_none());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn sidebar_plugin_starts_again_when_its_program_file_changes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!("herdr-sidebar-reload-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create plugin dir");
+    let program = dir.join("pane");
+    let write = |body: &str| {
+        std::fs::write(&program, format!("#!/bin/sh\nprintf '{body}'; sleep 30\n"))
+            .expect("write plugin program");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("make plugin program executable");
+    };
+    write("BUILD-ONE");
+
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = "fake:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    let cwd = dir.clone();
+    state.set_sidebar_plugin_resolver(std::sync::Arc::new(move |_, _| {
+        Some(
+            crate::client::shell::sidebar_plugins::SidebarPluginCommand {
+                argv: vec!["./pane".into()],
+                cwd: cwd.clone(),
+                env: Vec::new(),
+            },
+        )
+    }));
+    state.set_snapshot(Box::new(snapshot()));
+    let text = sidebar_text_when(&mut state, |text| text.contains("BUILD-ONE")).await;
+    assert!(text.contains("BUILD-ONE"), "{text}");
+
+    write("BUILD-TWO");
+    let mut text = String::new();
+    for step in 1..200u64 {
+        // The clock runs ahead of the file checks, which are a few each second.
+        state
+            .tick_sidebar_plugins(std::time::Instant::now() + std::time::Duration::from_secs(step));
+        text = sidebar_text(&mut state);
+        if text.contains("BUILD-TWO") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    std::fs::remove_dir_all(&dir).expect("remove plugin dir");
+    assert!(text.contains("BUILD-TWO"), "{text}");
+    assert!(!state.sidebar_plugins.gave_up(SidebarSection::Spaces));
+}
