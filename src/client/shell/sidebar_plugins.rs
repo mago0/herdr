@@ -27,6 +27,10 @@ const SCROLLBACK_LIMIT_BYTES: usize = 64 * 1024;
 /// How long the client polls a plugin pane at a short interval after it sent input to it.
 const INPUT_ECHO_WINDOW: Duration = Duration::from_millis(400);
 const INPUT_ECHO_POLL: Duration = Duration::from_millis(16);
+/// Start of the terminal title a plugin pane sets to name the row under a right-click.
+const MENU_TITLE_PREFIX: &str = "herdr-menu;";
+/// How long a right-click waits for the plugin pane to name its row.
+const MENU_REPLY_WINDOW: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SidebarSection {
@@ -70,6 +74,35 @@ struct Pane {
     events: mpsc::Receiver<AppEvent>,
     drawn_seq: u64,
     started: Instant,
+    /// The last terminal title read, so a menu request is taken once.
+    title: Option<String>,
+}
+
+/// What a plugin row stands for, as named by its pane after a right-click.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SidebarMenuTarget {
+    Workspace(String),
+    Tab(String),
+    Pane(String),
+}
+
+/// A right-click on a plugin row, with the screen cell the menu opens at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SidebarMenuRequest {
+    pub(super) target: SidebarMenuTarget,
+    pub(super) x: u16,
+    pub(super) y: u16,
+}
+
+fn parse_menu_title(title: &str) -> Option<SidebarMenuTarget> {
+    let mut parts = title.strip_prefix(MENU_TITLE_PREFIX)?.split(';');
+    let (kind, id) = (parts.next()?, parts.next()?.to_owned());
+    match kind {
+        "workspace" => Some(SidebarMenuTarget::Workspace(id)),
+        "tab" => Some(SidebarMenuTarget::Tab(id)),
+        "pane" => Some(SidebarMenuTarget::Pane(id)),
+        _ => None,
+    }
 }
 
 #[derive(Default)]
@@ -90,6 +123,9 @@ pub(crate) struct SidebarPlugins {
     /// The server-focused pane when the sidebar took the keys. A change gives the keys back.
     focus_anchor: Option<String>,
     input_echo_until: std::cell::Cell<Option<Instant>>,
+    /// A right-click sent to a plugin pane that has not named its row yet.
+    menu_wait: std::cell::Cell<Option<(SidebarSection, u16, u16, Instant)>>,
+    menu_request: Option<SidebarMenuRequest>,
 }
 
 /// The part of each expanded sidebar section that a plugin pane draws.
@@ -178,10 +214,25 @@ impl SidebarPlugins {
     /// Drop panes whose process exited and report whether a pane has output not yet drawn.
     pub(super) fn tick(&mut self, now: Instant) -> bool {
         let mut repaint = false;
-        for slot in &mut self.slots {
+        let menu_wait = self
+            .menu_wait
+            .get()
+            .filter(|(_, _, _, at)| now.duration_since(*at) < MENU_REPLY_WINDOW);
+        self.menu_wait.set(menu_wait);
+        for (index, slot) in self.slots.iter_mut().enumerate() {
             let Some(pane) = slot.pane.as_mut() else {
                 continue;
             };
+            let title = pane.runtime.terminal_title();
+            if title != pane.title {
+                pane.title = title;
+                let waiting = menu_wait.filter(|(section, ..)| section.index() == index);
+                let target = pane.title.as_deref().and_then(parse_menu_title);
+                if let (Some((_, x, y, _)), Some(target)) = (waiting, target) {
+                    self.menu_wait.set(None);
+                    self.menu_request = Some(SidebarMenuRequest { target, x, y });
+                }
+            }
             let mut died = false;
             while let Ok(event) = pane.events.try_recv() {
                 died |= matches!(event, AppEvent::PaneDied { .. });
@@ -328,7 +379,16 @@ impl SidebarPlugins {
         if let Some(bytes) = bytes {
             let _ = pane.runtime.try_send_bytes(bytes.into());
             self.input_echo_until.set(Some(now + INPUT_ECHO_WINDOW));
+            if mouse.kind == MouseEventKind::Down(crossterm::event::MouseButton::Right) {
+                self.menu_wait
+                    .set(Some((section, mouse.column, mouse.row, now)));
+            }
         }
+    }
+
+    /// The menu a plugin pane asked for since the last call.
+    pub(super) fn take_menu_request(&mut self) -> Option<SidebarMenuRequest> {
+        self.menu_request.take()
     }
 
     /// Send a key to the focused plugin pane. Returns false when no plugin pane has the keys.
@@ -392,6 +452,7 @@ fn spawn(spec: &str, command: &SidebarPluginCommand, rect: Rect) -> Option<Pane>
             events,
             drawn_seq: 0,
             started: Instant::now(),
+            title: None,
         }),
         Err(error) => {
             tracing::warn!(spec, %error, "sidebar plugin pane did not start");
@@ -531,6 +592,18 @@ impl super::ClientShellState {
     }
 
     pub(crate) fn tick_sidebar_plugins(&mut self, now: Instant) -> bool {
-        self.sidebar_plugins.tick(now)
+        let mut repaint = self.sidebar_plugins.tick(now);
+        if let Some(request) = self.sidebar_plugins.take_menu_request() {
+            if self.overlay.is_none() && self.config.mouse_capture {
+                let (x, y) = (request.x, request.y);
+                match request.target {
+                    SidebarMenuTarget::Workspace(id) => self.open_workspace_context_menu(id, x, y),
+                    SidebarMenuTarget::Tab(id) => self.open_tab_context_menu(id, x, y),
+                    SidebarMenuTarget::Pane(id) => self.open_pane_context_menu(id, x, y),
+                }
+                repaint |= self.overlay.is_some();
+            }
+        }
+        repaint
     }
 }

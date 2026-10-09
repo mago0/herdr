@@ -1057,3 +1057,54 @@ async fn sidebar_plugin_that_is_not_installed_is_not_looked_up_on_every_frame() 
 
     assert_eq!(lookups.load(std::sync::atomic::Ordering::Relaxed), 1);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn sidebar_plugin_right_click_opens_the_menu_of_the_row_it_names() {
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = "fake:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    // The script answers a mouse press with the title that names the row under it.
+    state.set_sidebar_plugin_resolver(fake_sidebar_plugin(
+        "printf '\\033[?1000h\\033[?1006hREADY'; stty raw -echo; while :; do c=$(dd bs=1 count=1 2>/dev/null); case \"$c\" in M) printf '\\033]2;herdr-menu;workspace;ws_1;1\\007DONE';; esac; done",
+    ));
+    state.set_snapshot(Box::new(snapshot()));
+    sidebar_text_when(&mut state, |text| text.contains("READY")).await;
+    let body = state.hits.sidebar_plugins[0];
+
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: body.x + 3,
+        row: body.y + 1,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    assert!(state.overlay.is_none(), "the menu waits for the plugin");
+    sidebar_text_when(&mut state, |text| text.contains("DONE")).await;
+    state.tick_sidebar_plugins(std::time::Instant::now());
+
+    match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(ClientContextMenuOverlay {
+            target: ClientContextMenuTarget::Workspace { workspace_id, .. },
+            x,
+            y,
+            ..
+        })) => {
+            assert_eq!(workspace_id, "ws_1");
+            assert_eq!((*x, *y), (body.x + 3, body.y + 1));
+        }
+        other => panic!("workspace context menu, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sidebar_plugin_menu_title_without_a_right_click_opens_nothing() {
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = "fake:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_sidebar_plugin_resolver(fake_sidebar_plugin(
+        "printf '\\033]2;herdr-menu;workspace;ws_1;1\\007READY'; sleep 30",
+    ));
+    state.set_snapshot(Box::new(snapshot()));
+    sidebar_text_when(&mut state, |text| text.contains("READY")).await;
+    state.tick_sidebar_plugins(std::time::Instant::now());
+    assert!(state.overlay.is_none());
+}
