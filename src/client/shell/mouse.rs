@@ -916,6 +916,28 @@ impl ClientShellState {
         if self.popup_terminal_id.is_some() {
             return;
         }
+        if self.overlay.is_none() && self.chrome_drag.is_none() {
+            let section = SidebarSection::ALL
+                .into_iter()
+                .find(|section| super::contains(self.hits.sidebar_plugins[section.index()], point));
+            // A click does not move the keys into a plugin section, so typing after a click
+            // still reaches the pane. A click elsewhere gives the keys back to the panes.
+            if matches!(mouse.kind, MouseEventKind::Down(_))
+                && self.sidebar_plugins.focus() != section
+                && self.sidebar_plugins.set_focus(None, None)
+            {
+                outcome.repaint = true;
+            }
+            if let Some(section) = section {
+                self.sidebar_plugins.send_mouse(
+                    section,
+                    self.hits.sidebar_plugins[section.index()],
+                    mouse,
+                    std::time::Instant::now(),
+                );
+                return;
+            }
+        }
         if !self.replaying_url_click
             && self.overlay.is_none()
             && self.mode == ClientShellMode::Terminal

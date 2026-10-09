@@ -23,6 +23,7 @@ pub(crate) struct ClientShellConfig {
     pub(super) hide_tab_bar_when_single_tab: bool,
     pub(super) spaces: SpacesSidebarConfig,
     pub(super) agents: crate::config::AgentsSidebarConfig,
+    pub(super) agent_panel: bool,
     pub(super) agent_panel_sort: crate::config::AgentPanelSortConfig,
     pub(super) status_indicators: crate::config::StatusIndicatorStyle,
     pub(super) sound_enabled: bool,
@@ -103,6 +104,8 @@ pub(super) struct ShellHitMap {
     pub(super) sidebar_divider: Rect,
     pub(super) sidebar_section_divider: Rect,
     pub(super) sidebar_toggle: Rect,
+    /// The area each plugin-drawn sidebar section takes mouse input in.
+    pub(super) sidebar_plugins: [Rect; 2],
     pub(super) new_workspace: Rect,
     pub(super) new_tab: Rect,
     pub(super) tab_scroll_left: Rect,
@@ -862,6 +865,9 @@ pub(crate) struct ClientShellState {
     pub(super) sidebar_width_manual: bool,
     pub(super) sidebar_section_split: f32,
     pub(super) sidebar_section_split_manual: bool,
+    pub(super) agent_panel_visible: bool,
+    pub(super) agent_panel_visible_manual: bool,
+    pub(super) sidebar_plugins: SidebarPlugins,
     pub(super) agent_panel_sort_manual: bool,
     pub(super) last_sidebar_divider_click: Option<std::time::Instant>,
     pub(super) chrome_drag: Option<ClientChromeDrag>,
@@ -994,6 +1000,7 @@ impl ClientShellState {
             .filter(|split| split.is_finite())
             .map(|split| split.clamp(0.1, 0.9))
             .unwrap_or(0.5);
+        let agent_panel_visible = preferences.agent_panel.unwrap_or(config.agent_panel);
         if let Some(sort) = preferences.agent_panel_sort {
             config.agent_panel_sort = sort;
         }
@@ -1027,6 +1034,9 @@ impl ClientShellState {
             sidebar_width_manual: preferences.sidebar_width.is_some(),
             sidebar_section_split,
             sidebar_section_split_manual: preferences.sidebar_section_split.is_some(),
+            agent_panel_visible,
+            sidebar_plugins: SidebarPlugins::default(),
+            agent_panel_visible_manual: preferences.agent_panel.is_some(),
             agent_panel_sort_manual: preferences.agent_panel_sort.is_some(),
             last_sidebar_divider_click: None,
             chrome_drag: None,
@@ -1855,6 +1865,10 @@ impl ClientShellState {
 
     pub(crate) fn timer_delay(&self, now: std::time::Instant) -> std::time::Duration {
         let default = std::time::Duration::from_millis(100);
+        let default = self
+            .sidebar_plugins
+            .poll_delay(now)
+            .map_or(default, |delay| delay.min(default));
         self.selection_autoscroll_deadline
             .into_iter()
             .chain(self.selection_repaint_deadline)

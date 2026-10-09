@@ -11,6 +11,8 @@ use crate::detect::Agent;
 const MAX_SIDEBAR_ROWS: usize = 16;
 const MAX_SIDEBAR_TOKENS_PER_ROW: usize = 16;
 const DEFAULT_SIDEBAR_ROW_GAP: u16 = 0;
+/// The supervisor tree draws the spaces section when that plugin is installed.
+const DEFAULT_SPACES_SIDEBAR_PLUGIN: &str = "herdr-tree:tree";
 
 fn deserialize_sidebar_rows<'de, D, T>(deserializer: D) -> Result<Vec<Vec<T>>, D::Error>
 where
@@ -427,6 +429,9 @@ pub struct AgentsSidebarConfig {
     #[serde(default, deserialize_with = "deserialize_rows_by_agent")]
     pub rows_by_agent: BTreeMap<String, AgentSidebarRows>,
     pub row_gap: u16,
+    /// Plugin pane that draws this section, as "<plugin id>:<pane id>". Empty keeps the
+    /// native agent list. Default: "".
+    pub plugin: String,
 }
 
 impl AgentsSidebarConfig {
@@ -451,6 +456,7 @@ impl Default for AgentsSidebarConfig {
             ],
             rows_by_agent: BTreeMap::new(),
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
+            plugin: String::new(),
         }
     }
 }
@@ -461,6 +467,10 @@ pub struct SpacesSidebarConfig {
     #[serde(deserialize_with = "deserialize_sidebar_rows")]
     pub rows: SpaceSidebarRows,
     pub row_gap: u16,
+    /// Plugin pane that draws this section, as "<plugin id>:<pane id>". Empty keeps the
+    /// native spaces list, and so does a plugin that is not installed.
+    /// Default: "herdr-tree:tree".
+    pub plugin: String,
 }
 
 impl Default for SpacesSidebarConfig {
@@ -471,6 +481,7 @@ impl Default for SpacesSidebarConfig {
                 vec![SpaceSidebarToken::Branch, SpaceSidebarToken::GitStatus],
             ],
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
+            plugin: DEFAULT_SPACES_SIDEBAR_PLUGIN.into(),
         }
     }
 }

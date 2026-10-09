@@ -1016,12 +1016,27 @@ impl ClientShellState {
         key: crate::input::TerminalKey,
         outcome: &mut ClientShellInput,
     ) {
+        if matches!(&target, ClientInputTarget::Pane(_))
+            && self
+                .sidebar_plugins
+                .send_key(key.clone(), std::time::Instant::now())
+        {
+            return;
+        }
         if let Some(event) = ClientPaneInputEvent::from_terminal_key(key) {
             super::push_target_event(target, event, outcome);
         }
     }
 
     fn push_focused_pane_event(&self, event: ClientPaneInputEvent, outcome: &mut ClientShellInput) {
+        if let ClientPaneInputEvent::TextCommit(text) | ClientPaneInputEvent::Paste(text) = &event {
+            if self
+                .sidebar_plugins
+                .send_text(text, std::time::Instant::now())
+            {
+                return;
+            }
+        }
         if let Some(pane_id) = self.focused_pane_id() {
             super::push_target_event(ClientInputTarget::Pane(pane_id), event, outcome);
         }

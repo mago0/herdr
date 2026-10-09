@@ -19,6 +19,17 @@ impl ClientShellState {
                 outcome.resize = true;
                 self.persist_chrome_preferences(outcome);
             }
+            crate::input::KeybindMatch::Action(crate::input::KeybindAction::ToggleAgentPanel) => {
+                self.agent_panel_visible = !self.agent_panel_visible;
+                self.agent_panel_visible_manual = true;
+                outcome.repaint = true;
+                self.persist_chrome_preferences(outcome);
+            }
+            crate::input::KeybindMatch::Action(crate::input::KeybindAction::FocusSidebar) => {
+                if self.sidebar_plugins.cycle_focus(self.focused_pane_id()) {
+                    outcome.repaint = true;
+                }
+            }
             crate::input::KeybindMatch::Action(action) => {
                 if self.workspace_preview_action_blocked()
                     && matches!(

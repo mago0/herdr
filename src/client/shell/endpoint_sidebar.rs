@@ -249,10 +249,16 @@ pub(super) fn render_expanded(
     } else {
         Rect::new(area.right().saturating_sub(1), area.y, 1, area.height)
     };
-    let (workspace_area, detail_area) =
-        crate::ui::expanded_sidebar_sections(area, state.sidebar_section_split);
-    hits.sidebar_section_divider =
-        crate::ui::sidebar_section_divider_rect(area, state.sidebar_section_split);
+    let (workspace_area, detail_area) = crate::ui::expanded_sidebar_sections(
+        area,
+        state.sidebar_section_split,
+        state.agent_panel_visible,
+    );
+    hits.sidebar_section_divider = crate::ui::sidebar_section_divider_rect(
+        area,
+        state.sidebar_section_split,
+        state.agent_panel_visible,
+    );
     put_text(
         buffer,
         workspace_area.x,
@@ -553,16 +559,18 @@ pub(super) fn render_expanded(
             }),
         );
     }
-    super::endpoint_agents::render_expanded(
-        buffer,
-        detail_area,
-        active_snapshot.and_then(|snapshot| snapshot.agent_view_label.as_deref()),
-        state.endpoints,
-        state.active_endpoint_id,
-        config,
-        state.agent_scroll,
-        hits,
-    );
+    if state.agent_panel_visible {
+        super::endpoint_agents::render_expanded(
+            buffer,
+            detail_area,
+            active_snapshot.and_then(|snapshot| snapshot.agent_view_label.as_deref()),
+            state.endpoints,
+            state.active_endpoint_id,
+            config,
+            state.agent_scroll,
+            hits,
+        );
+    }
     hits.sidebar_toggle = Rect::new(
         area.right().saturating_sub(2),
         area.bottom().saturating_sub(1),

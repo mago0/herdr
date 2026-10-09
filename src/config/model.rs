@@ -455,6 +455,11 @@ pub struct KeysConfig {
     pub resize_pane_right: BindingConfig,
     /// Toggle sidebar collapse. Default: "prefix+b"
     pub toggle_sidebar: BindingConfig,
+    /// Show or hide the agent panel in the sidebar. Unset by default.
+    pub toggle_agent_panel: BindingConfig,
+    /// Move the keys to the next plugin-drawn sidebar section, then back to the panes.
+    /// Unset by default.
+    pub focus_sidebar: BindingConfig,
     /// Optional indexed shortcuts expanded over number keys 1-9.
     pub indexed: IndexedKeysConfig,
     /// Prefix-mode custom command bindings.
@@ -592,6 +597,10 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     toggle_sidebar: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    toggle_agent_panel: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    focus_sidebar: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     indexed: Option<IndexedKeysConfig>,
     #[serde(skip_serializing)]
     command: Option<Vec<CommandKeybindConfig>>,
@@ -703,6 +712,8 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(resize_pane_up);
         apply_field!(resize_pane_right);
         apply_field!(toggle_sidebar);
+        apply_field!(toggle_agent_panel);
+        apply_field!(focus_sidebar);
         apply_field!(indexed);
         apply_field!(command);
 
@@ -808,6 +819,8 @@ impl KeysConfig {
         copy_effective_action_field!(resize_pane_up, keybinds.resize_pane_up);
         copy_effective_action_field!(resize_pane_right, keybinds.resize_pane_right);
         copy_effective_action_field!(toggle_sidebar, keybinds.toggle_sidebar);
+        copy_effective_action_field!(toggle_agent_panel, keybinds.toggle_agent_panel);
+        copy_effective_action_field!(focus_sidebar, keybinds.focus_sidebar);
         copy_user_field!(indexed);
 
         profile
@@ -991,6 +1004,8 @@ pub struct UiConfig {
     /// Format for the outer terminal window title. Empty leaves the title alone.
     /// Default: "{hostname}: {workspace}".
     pub window_title: String,
+    /// Show the agent panel in the expanded sidebar. Default: true.
+    pub agent_panel: bool,
     /// Agent sidebar ordering. Saved values are "spaces" or "priority". Default: "spaces".
     pub agent_panel_sort: AgentPanelSortConfig,
     /// Retired setting that Herdr wrote before the workspace filter was removed.
@@ -1177,6 +1192,8 @@ impl Default for KeysConfig {
             resize_pane_up: BindingConfig::empty(),
             resize_pane_right: BindingConfig::empty(),
             toggle_sidebar: BindingConfig::one("prefix+b"),
+            toggle_agent_panel: BindingConfig::empty(),
+            focus_sidebar: BindingConfig::empty(),
             indexed: IndexedKeysConfig::default(),
             command: Vec::new(),
             user_fields: BTreeSet::new(),
@@ -1220,6 +1237,7 @@ impl Default for UiConfig {
             tab_bar_right: Vec::new(),
             tab_bar_right_separator: " ".into(),
             window_title: super::window_title::default_window_title(),
+            agent_panel: true,
             agent_panel_sort: AgentPanelSortConfig::Spaces,
             _legacy_agent_panel_scope: None,
             status_indicators: StatusIndicatorStyle::Dots,
@@ -1439,6 +1457,20 @@ startup_per_agent_delay_ms = 0
         let config: Config = toml::from_str(toml).unwrap();
         assert!(!config.session.resume_agents_on_restore);
         assert_eq!(config.session.startup_per_agent_delay_ms, 0);
+    }
+
+    #[test]
+    fn agent_panel_is_shown_by_default_and_can_be_hidden() {
+        assert!(Config::default().ui.agent_panel);
+
+        let config: Config = toml::from_str(
+            r#"
+[ui]
+agent_panel = false
+"#,
+        )
+        .unwrap();
+        assert!(!config.ui.agent_panel);
     }
 
     #[test]

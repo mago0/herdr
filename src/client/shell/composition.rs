@@ -68,6 +68,8 @@ impl ClientShellState {
             reveal_focused_tab: &mut self.reveal_focused_tab,
             sidebar_collapsed: false,
             sidebar_section_split: self.sidebar_section_split,
+            agent_panel_visible: self.agent_panel_visible,
+            sidebar_plugins: &self.sidebar_plugins,
             tab_drag_insert_index: None,
             selected_workspace_id: self
                 .navigate_workspace_id
@@ -159,6 +161,8 @@ impl ClientShellState {
             self.reveal_mobile_workspace = true;
         }
         self.last_composed_size = Some((cols, rows));
+        let sidebar = self.layout(cols, rows).sidebar;
+        self.sync_sidebar_plugins(sidebar);
         let valid_navigation_target = self.mode == ClientShellMode::Navigate
             && self
                 .navigate_workspace_id
@@ -224,6 +228,8 @@ impl ClientShellState {
                 reveal_focused_tab: &mut self.reveal_focused_tab,
                 sidebar_collapsed: self.sidebar_collapsed,
                 sidebar_section_split: self.sidebar_section_split,
+                agent_panel_visible: self.agent_panel_visible,
+                sidebar_plugins: &self.sidebar_plugins,
                 tab_drag_insert_index,
                 selected_workspace_id: self
                     .navigate_workspace_id

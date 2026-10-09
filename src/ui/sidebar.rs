@@ -47,10 +47,24 @@ fn sidebar_section_heights(total_height: u16, split_ratio: f32) -> (u16, u16) {
     )
 }
 
-pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
+pub(crate) fn expanded_sidebar_sections(
+    area: Rect,
+    split_ratio: f32,
+    show_agents: bool,
+) -> (Rect, Rect) {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     if content.is_empty() {
         return (Rect::default(), Rect::default());
+    }
+    if !show_agents {
+        // The last row belongs to the sidebar collapse control.
+        let spaces = Rect::new(
+            content.x,
+            content.y,
+            content.width,
+            content.height.saturating_sub(1),
+        );
+        return (spaces, Rect::default());
     }
 
     let (workspace_height, detail_height) = sidebar_section_heights(content.height, split_ratio);
@@ -65,9 +79,13 @@ pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, 
     )
 }
 
-pub(crate) fn sidebar_section_divider_rect(area: Rect, split_ratio: f32) -> Rect {
+pub(crate) fn sidebar_section_divider_rect(
+    area: Rect,
+    split_ratio: f32,
+    show_agents: bool,
+) -> Rect {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
-    if content.width == 0 || content.height < 6 {
+    if !show_agents || content.width == 0 || content.height < 6 {
         return Rect::default();
     }
 
@@ -293,4 +311,30 @@ fn apply_token_style(mut style: Style, patch: crate::config::SidebarTokenStyle) 
         };
     }
     style
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sections_split_the_sidebar_between_spaces_and_agents() {
+        let area = Rect::new(0, 0, 26, 30);
+        let (spaces, agents) = expanded_sidebar_sections(area, 0.5, true);
+        assert_eq!(spaces, Rect::new(0, 0, 25, 15));
+        assert_eq!(agents, Rect::new(0, 15, 25, 15));
+        assert_eq!(
+            sidebar_section_divider_rect(area, 0.5, true),
+            Rect::new(0, 15, 25, 1)
+        );
+    }
+
+    #[test]
+    fn hidden_agent_panel_leaves_spaces_every_row_but_the_collapse_control() {
+        let area = Rect::new(0, 0, 26, 30);
+        let (spaces, agents) = expanded_sidebar_sections(area, 0.5, false);
+        assert_eq!(spaces, Rect::new(0, 0, 25, 29));
+        assert!(agents.is_empty());
+        assert!(sidebar_section_divider_rect(area, 0.5, false).is_empty());
+    }
 }

@@ -826,3 +826,234 @@ fn resize_mode_reuses_endpoint_resize_and_stays_active_until_done() {
     assert!(state.handle_input_bytes(b"\r").actions.is_empty());
     assert_eq!(state.mode, ClientShellMode::Terminal);
 }
+
+fn sidebar_text(state: &mut ClientShellState) -> String {
+    state.set_pane_surface(surface());
+    state
+        .compose(106, 30)
+        .expect("composed frame")
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect()
+}
+
+#[test]
+fn hidden_agent_panel_gives_the_spaces_list_the_sidebar_height() {
+    let mut config = Config::default();
+    config.ui.agent_panel = false;
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_snapshot(Box::new(snapshot()));
+
+    let text = sidebar_text(&mut state);
+
+    assert!(text.contains(" spaces"));
+    assert!(!text.contains(" agents"));
+    assert_eq!(state.hits.sidebar_section_divider, Rect::default());
+    // The spaces footer sits directly above the collapse control, not on top of it.
+    assert_eq!(state.hits.new_workspace.y + 1, state.hits.sidebar_toggle.y);
+}
+
+#[test]
+fn toggle_agent_panel_keybind_hides_the_panel_and_keeps_the_choice() {
+    let path = std::env::temp_dir().join(format!(
+        "herdr-client-shell-agent-panel-{}.json",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut config = Config::default();
+    config.keys.toggle_agent_panel = crate::config::BindingConfig::one("prefix+y");
+    let mut state = ClientShellState::new(
+        ClientShellConfig::from_config(&config).with_preferences_path(path.clone()),
+    );
+    state.set_snapshot(Box::new(snapshot()));
+    assert!(sidebar_text(&mut state).contains(" agents"));
+
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Char('b'),
+        KeyModifiers::CONTROL,
+    ))]);
+    let toggled = state.handle_raw_events(vec![RawInputEvent::Key(
+        crate::input::TerminalKey::new(KeyCode::Char('y'), KeyModifiers::NONE),
+    )]);
+
+    assert!(toggled.repaint);
+    assert!(!state.agent_panel_visible);
+    assert!(!sidebar_text(&mut state).contains(" agents"));
+
+    // The manual choice wins over the config default on the next start.
+    let reloaded = ClientShellState::new(
+        ClientShellConfig::from_config(&Config::default()).with_preferences_path(path.clone()),
+    );
+    assert!(!reloaded.agent_panel_visible);
+    std::fs::remove_file(path).expect("remove client chrome preferences");
+}
+
+fn fake_sidebar_plugin(
+    script: &'static str,
+) -> crate::client::shell::sidebar_plugins::SidebarPluginResolver {
+    std::sync::Arc::new(move |spec, _section| {
+        (spec == "fake:pane").then(
+            || crate::client::shell::sidebar_plugins::SidebarPluginCommand {
+                argv: vec!["sh".into(), "-c".into(), script.into()],
+                cwd: std::env::temp_dir(),
+                env: Vec::new(),
+            },
+        )
+    })
+}
+
+async fn sidebar_text_when(state: &mut ClientShellState, done: impl Fn(&str) -> bool) -> String {
+    let mut text = String::new();
+    for _ in 0..200 {
+        state.tick_sidebar_plugins(std::time::Instant::now());
+        text = sidebar_text(state);
+        if done(&text) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    text
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn spaces_plugin_draws_the_spaces_section_and_keeps_its_footer() {
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = "fake:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_sidebar_plugin_resolver(fake_sidebar_plugin("printf 'PLUGIN-SPACES'; sleep 30"));
+    state.set_snapshot(Box::new(snapshot()));
+
+    let text = sidebar_text_when(&mut state, |text| text.contains("PLUGIN-SPACES")).await;
+
+    assert!(text.contains("PLUGIN-SPACES"), "{text}");
+    assert!(text.contains(" spaces"));
+    assert!(text.contains(" agents"));
+    assert!(state.hits.workspaces.is_empty());
+    assert!(!state.hits.sidebar_plugins[0].is_empty());
+    assert_eq!(
+        state.hits.sidebar_plugins[0].bottom(),
+        state.hits.new_workspace.y
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn agents_plugin_draws_the_agents_section() {
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = String::new();
+    config.ui.sidebar.agents.plugin = "fake:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_sidebar_plugin_resolver(fake_sidebar_plugin("printf 'PLUGIN-AGENTS'; sleep 30"));
+    state.set_snapshot(Box::new(snapshot()));
+
+    let text = sidebar_text_when(&mut state, |text| text.contains("PLUGIN-AGENTS")).await;
+
+    assert!(text.contains("PLUGIN-AGENTS"), "{text}");
+    assert!(!state.hits.workspaces.is_empty());
+    assert!(state.hits.agents.is_empty());
+    assert!(!state.hits.sidebar_plugins[1].is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sidebar_plugin_that_is_not_installed_keeps_the_native_spaces_list() {
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = "missing:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_sidebar_plugin_resolver(fake_sidebar_plugin("true"));
+    state.set_snapshot(Box::new(snapshot()));
+
+    sidebar_text(&mut state);
+
+    assert!(!state.hits.workspaces.is_empty());
+    assert!(state.hits.sidebar_plugins[0].is_empty());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sidebar_plugin_that_keeps_exiting_gives_the_section_back() {
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = "fake:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_sidebar_plugin_resolver(fake_sidebar_plugin("exit 1"));
+    state.set_snapshot(Box::new(snapshot()));
+
+    let mut native = false;
+    for _ in 0..400 {
+        state.tick_sidebar_plugins(std::time::Instant::now());
+        sidebar_text(&mut state);
+        native = !state.hits.workspaces.is_empty()
+            && !state.sidebar_plugins.active(SidebarSection::Spaces);
+        if native && state.sidebar_plugins.gave_up(SidebarSection::Spaces) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    assert!(native);
+    assert!(state.sidebar_plugins.gave_up(SidebarSection::Spaces));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sidebar_plugin_takes_clicks_and_takes_keys_only_after_the_focus_keybind() {
+    let mut config = Config::default();
+    config.keys.focus_sidebar = crate::config::BindingConfig::one("prefix+u");
+    config.ui.sidebar.spaces.plugin = "fake:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    // The script turns on mouse reporting, then prints each line it reads back in capitals.
+    state.set_sidebar_plugin_resolver(fake_sidebar_plugin(
+        "printf '\\033[?1000h\\033[?1006hREADY'; stty raw -echo; while :; do c=$(dd bs=1 count=1 2>/dev/null); case \"$c\" in k) printf 'GOT-KEY';; M) printf 'GOT-MOUSE';; esac; done",
+    ));
+    state.set_snapshot(Box::new(snapshot()));
+    sidebar_text_when(&mut state, |text| text.contains("READY")).await;
+    let body = state.hits.sidebar_plugins[0];
+
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: body.x + 1,
+        row: body.y + 1,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    assert_eq!(state.sidebar_plugins.focus(), None);
+    let text = sidebar_text_when(&mut state, |text| text.contains("GOT-MOUSE")).await;
+    assert!(text.contains("GOT-MOUSE"), "{text}");
+
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Char('b'),
+        KeyModifiers::CONTROL,
+    ))]);
+    state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Char('u'),
+        KeyModifiers::NONE,
+    ))]);
+    assert_eq!(state.sidebar_plugins.focus(), Some(SidebarSection::Spaces));
+
+    let typed = state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
+        KeyCode::Char('k'),
+        KeyModifiers::NONE,
+    ))]);
+    assert!(
+        typed.actions.is_empty(),
+        "the key must not reach the server pane"
+    );
+    let text = sidebar_text_when(&mut state, |text| text.contains("GOT-KEY")).await;
+    assert!(text.contains("GOT-KEY"), "{text}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sidebar_plugin_that_is_not_installed_is_not_looked_up_on_every_frame() {
+    let lookups = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = lookups.clone();
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = "missing:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_sidebar_plugin_resolver(std::sync::Arc::new(move |_, _| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        None
+    }));
+    state.set_snapshot(Box::new(snapshot()));
+
+    for _ in 0..5 {
+        sidebar_text(&mut state);
+    }
+
+    assert_eq!(lookups.load(std::sync::atomic::Ordering::Relaxed), 1);
+}

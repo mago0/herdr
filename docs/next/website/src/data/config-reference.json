@@ -836,6 +836,18 @@
           "description": "Toggle sidebar collapse."
         },
         {
+          "key": "keys.toggle_agent_panel",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Show or hide the agent panel in the sidebar. Unset by default."
+        },
+        {
+          "key": "keys.focus_sidebar",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Move the keys to the next plugin-drawn sidebar section, then back to the panes. Unset by default."
+        },
+        {
           "key": "keys.indexed.tabs",
           "type": "string",
           "default": "unset",
@@ -1035,6 +1047,12 @@
           "description": "Title Herdr writes to the terminal it runs in. Tokens: {hostname}, {workspace}, {tab}, {pane}, {terminal_title}. Empty leaves the outer title alone."
         },
         {
+          "key": "ui.agent_panel",
+          "type": "boolean",
+          "default": "true",
+          "description": "Show the agent panel in the expanded sidebar."
+        },
+        {
           "key": "ui.agent_panel_sort",
           "type": "enum",
           "default": "\"spaces\"",
@@ -1061,6 +1079,12 @@
           "description": "Blank terminal rows between expanded Agent sidebar entries. Set to 1 to restore the previous spacing."
         },
         {
+          "key": "ui.sidebar.agents.plugin",
+          "type": "string",
+          "default": "\"\"",
+          "description": "Plugin pane that draws the Agents section, as \"<plugin id>:<pane id>\". Empty keeps the native agent list."
+        },
+        {
           "key": "ui.sidebar.agents.rows",
           "type": "list of token rows",
           "default": "[[\"state_icon\", \"machine\", \"workspace\", \"tab\"], [\"agent\"]]",
@@ -1077,6 +1101,12 @@
           "type": "integer",
           "default": "0",
           "description": "Blank terminal rows between worktree groups and unrelated top-level Spaces. Worktree parents and their indented children remain packed."
+        },
+        {
+          "key": "ui.sidebar.spaces.plugin",
+          "type": "string",
+          "default": "\"herdr-tree:tree\"",
+          "description": "Plugin pane that draws the Spaces section, as \"<plugin id>:<pane id>\". Empty keeps the native spaces list, and so does a plugin that is not installed."
         },
         {
           "key": "ui.sidebar.spaces.rows",

@@ -491,6 +491,7 @@ async fn run_client_loop(
                     })
                 }),
         );
+        shell.set_sidebar_plugin_resolver(shell::installed_plugin_resolver());
         if local_unavailable {
             shell.set_endpoint_status(
                 &endpoint::ClientEndpointId::Local,
@@ -2250,7 +2251,8 @@ async fn run_client_loop(
                         outcome.repaint |= notification_repaint
                             | shell.tick_copy_feedback(now)
                             | shell.tick_workspace_highlight(now)
-                            | shell.tick_endpoint_error(now);
+                            | shell.tick_endpoint_error(now)
+                            | shell.tick_sidebar_plugins(now);
                         let frame = outcome
                             .repaint
                             .then(|| shell.compose(state.reported_size.0, state.reported_size.1))

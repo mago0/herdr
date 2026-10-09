@@ -190,6 +190,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # resize_pane_up = ""     # optional, e.g. "ctrl+shift+alt+up"
 # resize_pane_right = ""  # optional, e.g. "ctrl+shift+alt+right"
 # toggle_sidebar = "prefix+b"
+# toggle_agent_panel = ""  # optional, shows or hides the agent panel in the sidebar
+# focus_sidebar = ""       # optional, moves the keys to a plugin-drawn sidebar section and back
 
 # Navigate-mode movement. These local shortcuts win while navigate mode is open.
 # They are independent from focus_pane_*. Do not include prefix+, esc, enter, tab, or 1..9 here.
@@ -327,6 +329,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Set to "" to leave the outer terminal title alone.
 # window_title = "{hostname}: {workspace}"
 
+# Show the agent panel below the spaces list in the expanded sidebar.
+# agent_panel = true
+
 # Agent panel ordering: "spaces" (grouped by space) or "priority" (attention queue).
 # "workspaces" is accepted as an alias for "spaces".
 # agent_panel_sort = "spaces"
@@ -347,6 +352,8 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # [ui.sidebar.agents]
 # Blank rows between agent entries. Set to 1 to restore the previous spacing.
 # row_gap = 0
+# A plugin pane that draws this section, as "<plugin id>:<pane id>". Empty keeps the native list.
+# plugin = ""
 # rows = [["state_icon", "machine", "workspace", "tab"], ["agent"]]
 # Optional canonical agent IDs replace the default rows for matching agents.
 # [ui.sidebar.agents.rows_by_agent]
@@ -358,6 +365,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # [ui.sidebar.spaces]
 # Blank rows between space entries. Set to 1 to restore the previous spacing.
 # row_gap = 0
+# A plugin pane that draws this section. The native spaces list stays when the value is ""
+# or the plugin is not installed.
+# plugin = "herdr-tree:tree"
 # rows = [["state_icon", "workspace"], ["branch", "git_status"]]
 
 # Background notification popup delivery
