@@ -31,6 +31,9 @@ const INPUT_ECHO_POLL: Duration = Duration::from_millis(16);
 const PROGRAM_CHECK: Duration = Duration::from_millis(500);
 /// Start of the terminal title a plugin pane sets to name the row under a right-click.
 const MENU_TITLE_PREFIX: &str = "herdr-menu;";
+/// The pane token that holds a row label, and the metadata source it is reported under.
+pub(super) const LABEL_TOKEN: &str = "label";
+pub(super) const LABEL_TOKEN_SOURCE: &str = "tree";
 /// How long a right-click waits for the plugin pane to name its row.
 const MENU_REPLY_WINDOW: Duration = Duration::from_secs(1);
 
@@ -143,17 +146,27 @@ pub(super) struct SidebarMenuRequest {
     pub(super) target: SidebarMenuTarget,
     pub(super) x: u16,
     pub(super) y: u16,
+    /// The agent pane of the row and the label it has, when the row is one agent.
+    pub(super) label_pane: Option<(String, String)>,
 }
 
-fn parse_menu_title(title: &str) -> Option<SidebarMenuTarget> {
-    let mut parts = title.strip_prefix(MENU_TITLE_PREFIX)?.split(';');
+/// Reads `herdr-menu;<kind>;<id>;<count>;<agent pane>;<label>`. The last two parts are optional,
+/// and the label is the rest of the title.
+fn parse_menu_title(title: &str) -> Option<(SidebarMenuTarget, Option<(String, String)>)> {
+    let mut parts = title.strip_prefix(MENU_TITLE_PREFIX)?.splitn(5, ';');
     let (kind, id) = (parts.next()?, parts.next()?.to_owned());
-    match kind {
-        "workspace" => Some(SidebarMenuTarget::Workspace(id)),
-        "tab" => Some(SidebarMenuTarget::Tab(id)),
-        "pane" => Some(SidebarMenuTarget::Pane(id)),
-        _ => None,
-    }
+    let target = match kind {
+        "workspace" => SidebarMenuTarget::Workspace(id),
+        "tab" => SidebarMenuTarget::Tab(id),
+        "pane" => SidebarMenuTarget::Pane(id),
+        _ => return None,
+    };
+    let _count = parts.next();
+    let label_pane = parts
+        .next()
+        .filter(|pane| !pane.is_empty())
+        .map(|pane| (pane.to_owned(), parts.next().unwrap_or_default().to_owned()));
+    Some((target, label_pane))
 }
 
 #[derive(Default)]
@@ -279,9 +292,14 @@ impl SidebarPlugins {
                 pane.title = title;
                 let waiting = menu_wait.filter(|(section, ..)| section.index() == index);
                 let target = pane.title.as_deref().and_then(parse_menu_title);
-                if let (Some((_, x, y, _)), Some(target)) = (waiting, target) {
+                if let (Some((_, x, y, _)), Some((target, label_pane))) = (waiting, target) {
                     self.menu_wait.set(None);
-                    self.menu_request = Some(SidebarMenuRequest { target, x, y });
+                    self.menu_request = Some(SidebarMenuRequest {
+                        target,
+                        x,
+                        y,
+                        label_pane,
+                    });
                 }
             }
             let mut died = false;
@@ -661,7 +679,10 @@ impl super::ClientShellState {
                     SidebarMenuTarget::Tab(id) => self.open_tab_context_menu(id, x, y),
                     SidebarMenuTarget::Pane(id) => self.open_pane_context_menu(id, x, y),
                 }
-                repaint |= self.overlay.is_some();
+                if let Some(super::ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() {
+                    menu.label_pane = request.label_pane;
+                    repaint = true;
+                }
             }
         }
         repaint

@@ -980,6 +980,30 @@ impl ClientShellState {
                     label: Some(trimmed.to_owned()),
                 },
             )),
+            ClientRenameTarget::PaneLabel { pane_id } => {
+                Some(crate::api::schema::Method::PaneReportMetadata(
+                    crate::api::schema::PaneReportMetadataParams {
+                        pane_id,
+                        source: super::sidebar_plugins::LABEL_TOKEN_SOURCE.into(),
+                        agent: None,
+                        applies_to_source: None,
+                        title: None,
+                        display_agent: None,
+                        state_labels: Default::default(),
+                        // An empty label clears the token.
+                        tokens: [(
+                            super::sidebar_plugins::LABEL_TOKEN.to_owned(),
+                            (!trimmed.is_empty()).then(|| trimmed.to_owned()),
+                        )]
+                        .into(),
+                        clear_title: false,
+                        clear_display_agent: false,
+                        clear_state_labels: false,
+                        seq: None,
+                        ttl_ms: None,
+                    },
+                ))
+            }
         };
         if let Some(method) = method {
             self.push_endpoint_method(method, outcome);

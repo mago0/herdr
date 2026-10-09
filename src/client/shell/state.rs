@@ -318,6 +318,10 @@ pub(super) enum ClientRenameTarget {
     Pane {
         pane_id: String,
     },
+    /// The `label` token of a pane, which a sidebar plugin draws beside the pane's row.
+    PaneLabel {
+        pane_id: String,
+    },
 }
 
 #[derive(Debug)]
@@ -528,6 +532,7 @@ pub(super) enum ClientContextMenuAction {
     Zoom,
     ToggleRightClickPassthrough,
     ClosePane,
+    Label,
 }
 
 #[derive(Debug)]
@@ -558,6 +563,8 @@ pub(super) struct ClientContextMenuOverlay {
     pub(super) x: u16,
     pub(super) y: u16,
     pub(super) highlighted: usize,
+    /// The agent pane of a sidebar plugin row and the label it has. It adds the label item.
+    pub(super) label_pane: Option<(String, String)>,
 }
 
 pub(super) struct ClientContextMenuItem {

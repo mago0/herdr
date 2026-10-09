@@ -5,6 +5,17 @@ impl ClientContextMenuOverlay {
         use ClientContextMenuAction as Action;
 
         let item = |label, action| ClientContextMenuItem { label, action };
+        let mut items = self.target_items();
+        if self.label_pane.is_some() {
+            items.push(item("Label...", Action::Label));
+        }
+        items
+    }
+
+    fn target_items(&self) -> Vec<ClientContextMenuItem> {
+        use ClientContextMenuAction as Action;
+
+        let item = |label, action| ClientContextMenuItem { label, action };
         match &self.target {
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
@@ -120,6 +131,7 @@ impl ClientShellState {
             x,
             y,
             highlighted: 0,
+            label_pane: None,
         }));
     }
 
@@ -139,6 +151,7 @@ impl ClientShellState {
             x,
             y,
             highlighted: 0,
+            label_pane: None,
         }));
     }
 
@@ -164,6 +177,7 @@ impl ClientShellState {
             x,
             y,
             highlighted: 0,
+            label_pane: None,
         }));
     }
 
@@ -191,6 +205,17 @@ impl ClientShellState {
             outcome.repaint = true;
             return;
         };
+        if action == ClientContextMenuAction::Label {
+            if let Some((pane_id, label)) = menu.label_pane {
+                self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
+                    title: "label agent",
+                    input: TextEditor::new(&label, false),
+                    target: ClientRenameTarget::PaneLabel { pane_id },
+                }));
+            }
+            outcome.repaint = true;
+            return;
+        }
         match menu.target {
             ClientContextMenuTarget::Workspace { workspace_id, .. } => {
                 self.activate_workspace_context_action(workspace_id, action, outcome)

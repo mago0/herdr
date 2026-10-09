@@ -1157,3 +1157,81 @@ async fn sidebar_plugin_starts_again_when_its_program_file_changes() {
     assert!(text.contains("BUILD-TWO"), "{text}");
     assert!(!state.sidebar_plugins.gave_up(SidebarSection::Spaces));
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn sidebar_plugin_row_menu_sets_and_clears_the_label_of_its_agent_pane() {
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = "fake:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    // The title names the row, then the pane of its agent and the label that pane has.
+    state.set_sidebar_plugin_resolver(fake_sidebar_plugin(
+        "printf '\\033[?1000h\\033[?1006hREADY'; stty raw -echo; while :; do c=$(dd bs=1 count=1 2>/dev/null); case \"$c\" in M) printf '\\033]2;herdr-menu;workspace;ws_1;1;pane_1;OLD-1\\007DONE';; esac; done",
+    ));
+    state.set_snapshot(Box::new(snapshot()));
+    sidebar_text_when(&mut state, |text| text.contains("READY")).await;
+    let body = state.hits.sidebar_plugins[0];
+
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: body.x + 3,
+        row: body.y + 1,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    sidebar_text_when(&mut state, |text| text.contains("DONE")).await;
+    state.tick_sidebar_plugins(std::time::Instant::now());
+    let index = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => menu
+            .items()
+            .iter()
+            .position(|item| item.label == "Label...")
+            .expect("a row that is one agent has a label item"),
+        other => panic!("context menu, got {other:?}"),
+    };
+    state.activate_context_menu_item(index, &mut ClientShellInput::default());
+    match state.overlay.as_ref() {
+        Some(ClientShellOverlay::Rename(rename)) => assert_eq!(rename.input.as_str(), "OLD-1"),
+        other => panic!("label input, got {other:?}"),
+    }
+
+    // Ctrl+U empties the field. An empty label clears the token.
+    assert!(state.handle_input_bytes(&[0x15]).actions.is_empty());
+    let save = state.handle_input_bytes(b"\r");
+    let [ClientShellAction::Endpoint { request, .. }] = &save.actions[..] else {
+        panic!("one endpoint request, got {:?}", save.actions);
+    };
+    match &request.method {
+        crate::api::schema::Method::PaneReportMetadata(params) => {
+            assert_eq!(params.pane_id, "pane_1");
+            assert_eq!(params.source, "tree");
+            assert_eq!(params.tokens.get("label"), Some(&None));
+        }
+        other => panic!("pane metadata report, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sidebar_plugin_row_menu_has_no_label_item_without_an_agent_pane() {
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = "fake:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_sidebar_plugin_resolver(fake_sidebar_plugin(
+        "printf '\\033[?1000h\\033[?1006hREADY'; stty raw -echo; while :; do c=$(dd bs=1 count=1 2>/dev/null); case \"$c\" in M) printf '\\033]2;herdr-menu;workspace;ws_1;1;\\007DONE';; esac; done",
+    ));
+    state.set_snapshot(Box::new(snapshot()));
+    sidebar_text_when(&mut state, |text| text.contains("READY")).await;
+    let body = state.hits.sidebar_plugins[0];
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: body.x + 3,
+        row: body.y + 1,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    sidebar_text_when(&mut state, |text| text.contains("DONE")).await;
+    state.tick_sidebar_plugins(std::time::Instant::now());
+    match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => {
+            assert!(menu.items().iter().all(|item| item.label != "Label..."))
+        }
+        other => panic!("context menu, got {other:?}"),
+    }
+}
