@@ -654,6 +654,54 @@ mod tests {
     }
 
     #[test]
+    fn closing_the_last_tab_or_pane_of_a_group_parent_reports_the_panes_of_the_whole_group() {
+        for close_by_pane in [false, true] {
+            let mut app = app_with_worktree_group();
+            app.state.confirm_close = false;
+            app.state.ensure_test_terminals();
+            let mut expected = [0, 1]
+                .map(|index| {
+                    let root = app.state.workspaces[index].tabs[0].root_pane;
+                    app.public_pane_id(index, root).unwrap()
+                })
+                .to_vec();
+            let parent_pane = expected[0].clone();
+            expected.sort();
+            let response = if close_by_pane {
+                app.handle_pane_close(
+                    "req".into(),
+                    crate::api::schema::PaneTarget {
+                        pane_id: parent_pane,
+                    },
+                )
+            } else {
+                app.handle_tab_close(
+                    "req".into(),
+                    crate::api::schema::TabTarget {
+                        tab_id: app.public_tab_id(0, 0).unwrap(),
+                    },
+                )
+            };
+            assert!(
+                serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+                "{response}"
+            );
+            assert!(app.state.workspaces.is_empty(), "the whole group closes");
+            let mut closed = app
+                .event_hub
+                .events_after(0)
+                .into_iter()
+                .filter_map(|(_, event)| match event.data {
+                    EventData::PaneClosed { pane_id, .. } => Some(pane_id),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            closed.sort();
+            assert_eq!(closed, expected, "close_by_pane = {close_by_pane}");
+        }
+    }
+
+    #[test]
     fn api_workspace_close_parent_group_requires_explicit_group_intent() {
         for confirm_close in [true, false] {
             let mut app = app_with_worktree_group();

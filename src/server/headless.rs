@@ -2394,7 +2394,18 @@ impl HeadlessServer {
                 if let Err(err) = apply_client_pane_input_events(runtime, &events) {
                     warn!(client_id, pane_id, err = %err, "targeted client shell input failed");
                 }
-                foreground_changed | geometry_changed || runtime.scroll_metrics() != scroll_before
+                let scrolled = runtime.scroll_metrics() != scroll_before;
+                if let Some(terminal_id) = self
+                    .app
+                    .state
+                    .terminal_id_for_pane(workspace_index, runtime_pane_id)
+                {
+                    self.app.orchestration.note_pane_draft(
+                        &terminal_id,
+                        crate::app::orchestration::deliveries::draft_change(&events),
+                    );
+                }
+                foreground_changed | geometry_changed || scrolled
             }
             ServerEvent::ClientShellPopupInput {
                 client_id,

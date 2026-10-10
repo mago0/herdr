@@ -13,7 +13,7 @@ pub(crate) const MAX_ENDPOINT_REQUEST_ID_BYTES: usize = 128;
 const ENDPOINT_RESPONSE_CHUNK_BYTES: usize = 512 * 1024;
 
 const CLIENT_SHELL_METHODS: &[&str] = &[
-    "agent.send_keys",
+    "agent.answer",
     "client_shell.surface.set",
     "command.invoke",
     "integration.install",
@@ -292,8 +292,8 @@ mod tests {
         let mut actual = endpoint_method_shape_digests();
         // Freeze additive methods separately without rewriting the published fixture.
         assert_eq!(
-            actual.remove("agent.send_keys").as_deref(),
-            Some("55951bdf95d3ba4b2a2f72526029f3a7500f2af4c415e308365d0fc75a932ca1")
+            actual.remove("agent.answer").as_deref(),
+            Some("b87d2dc3abc92137587bc1d9a1657bae5f4c43cceac89515a267132abd352bf9")
         );
         assert_eq!(
             actual.remove("pane.report_metadata").as_deref(),

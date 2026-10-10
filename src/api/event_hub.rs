@@ -30,6 +30,8 @@ struct EventHubState {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EventHistory {
     pub(crate) latest: u64,
+    /// The cursor for the next read: the last event returned when the page is full, else `latest`.
+    pub(crate) next: u64,
     pub(crate) lost: bool,
     pub(crate) events: Vec<(u64, crate::api::schema::EventEnvelope)>,
 }
@@ -102,6 +104,7 @@ impl EventHub {
         let Ok(state) = self.inner.lock() else {
             return EventHistory {
                 latest: 0,
+                next: 0,
                 lost: true,
                 events: Vec::new(),
             };
@@ -110,6 +113,7 @@ impl EventHub {
         let Some(after) = after else {
             return EventHistory {
                 latest,
+                next: latest,
                 lost: false,
                 events: Vec::new(),
             };
@@ -118,7 +122,7 @@ impl EventHub {
             .events
             .first()
             .map_or(latest, |(first, _)| first.saturating_sub(1));
-        let events = state
+        let events: Vec<_> = state
             .events
             .iter()
             .filter(|(sequence, _)| *sequence > after)
@@ -128,8 +132,15 @@ impl EventHub {
             .take(limit)
             .cloned()
             .collect();
+        // A full page can have more behind it, so the caller reads on from its last event. A
+        // short page covers everything up to the head, also the events the filter left out.
+        let next = match events.last() {
+            Some((last, _)) if events.len() == limit => *last,
+            _ => latest,
+        };
         EventHistory {
             latest,
+            next,
             lost: after < oldest_known || after > latest,
             events,
         }
@@ -209,6 +220,32 @@ mod tests {
         let first = hub.read(Some(0), &kinds, 1);
         assert_eq!(first.events.len(), 1);
         assert_eq!(first.events[0].0, 2);
+    }
+
+    #[test]
+    fn the_next_cursor_reads_every_match_once_and_moves_past_events_the_filter_left_out() {
+        let hub = EventHub::default();
+        for index in 0..5 {
+            hub.push(pane_closed(&format!("w1:p{index}")));
+            hub.push(event());
+        }
+        let kinds = vec!["pane.closed".to_string()];
+        let mut cursor = 0;
+        let mut seen = Vec::new();
+        loop {
+            let page = hub.read(Some(cursor), &kinds, 2);
+            assert!(!page.lost);
+            seen.extend(page.events.iter().map(|(seq, _)| *seq));
+            if page.next == cursor {
+                break;
+            }
+            cursor = page.next;
+        }
+        assert_eq!(seen, vec![1, 3, 5, 7, 9]);
+        // The last event is one the filter left out, and the cursor is past it all the same.
+        assert_eq!(cursor, 10);
+        let none = hub.read(Some(0), &["tab.closed".to_string()], 2);
+        assert_eq!((none.events.len(), none.next), (0, 10));
     }
 
     #[test]

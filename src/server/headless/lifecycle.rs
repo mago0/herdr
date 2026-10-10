@@ -69,6 +69,8 @@ impl HeadlessServer {
             }
         }
 
+        // The new server reads this file, so it must hold the last change.
+        self.app.save_orchestration_now();
         let snapshot = crate::persist::capture(
             &self.app.state.workspaces,
             &self.app.state.terminals,

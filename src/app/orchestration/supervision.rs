@@ -69,19 +69,64 @@ pub(crate) fn one_line(text: &str) -> String {
 
 const BLOCKER_LINES: usize = 8;
 const MAX_BLOCKER_CHARS: usize = 400;
+const DIALOG_LINES: usize = 16;
+const MAX_DIALOG_LINE_CHARS: usize = 160;
 
-/// What a blocked agent shows: the last lines of its screen that have text. The answers of a
-/// dialog are at its end, so text that is too long loses its start.
-pub(crate) fn blocker_from_screen(screen: &str) -> Option<String> {
-    let mut lines: Vec<&str> = screen
+/// What a blocked agent shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Blocker {
+    /// One line for a report and for a person to read. None when the screen has no text.
+    pub(crate) text: Option<String>,
+    /// The last lines of the screen that have text, one entry for each line.
+    pub(crate) lines: Vec<String>,
+    /// The screen content counter the lines were read at. None for text an agent hook gave.
+    pub(crate) seq: Option<u64>,
+}
+
+impl Blocker {
+    pub(crate) fn from_screen(screen: &str, seq: u64) -> Self {
+        let lines = blocker_lines(screen);
+        Self {
+            text: blocker_text(&lines),
+            lines,
+            seq: Some(seq),
+        }
+    }
+
+    pub(crate) fn from_message(message: &str) -> Self {
+        let text = one_line(message);
+        Self {
+            lines: Vec::new(),
+            text: (!text.is_empty()).then_some(text),
+            seq: None,
+        }
+    }
+
+    /// Names the dialog on screen. None when the lines did not come from the screen.
+    pub(crate) fn dialog(&self) -> Option<String> {
+        (self.seq.is_some() && !self.lines.is_empty()).then(|| dialog_id(&self.lines))
+    }
+}
+
+/// The last lines of a screen that have text, each as one clean line.
+pub(crate) fn blocker_lines(screen: &str) -> Vec<String> {
+    let mut lines: Vec<String> = screen
         .lines()
         .map(str::trim)
         .filter(|line| line.chars().any(char::is_alphanumeric))
         .rev()
-        .take(BLOCKER_LINES)
+        .take(DIALOG_LINES)
+        .map(|line| clean(line).chars().take(MAX_DIALOG_LINE_CHARS).collect())
         .collect();
     lines.reverse();
-    let text = clean(&lines.join(" / "));
+    lines
+}
+
+/// The lines as one line. The answers of a dialog are at its end, so text that is too long loses
+/// its start.
+pub(crate) fn blocker_text(lines: &[String]) -> Option<String> {
+    let tail = &lines[lines.len().saturating_sub(BLOCKER_LINES)..];
+    let text = tail.join(" / ");
     let count = text.chars().count();
     if count == 0 {
         return None;
@@ -91,6 +136,24 @@ pub(crate) fn blocker_from_screen(screen: &str) -> Option<String> {
     }
     let tail: String = text.chars().skip(count - MAX_BLOCKER_CHARS).collect();
     Some(format!("...{tail}"))
+}
+
+/// What a blocked agent shows, as one line.
+#[cfg(test)]
+pub(crate) fn blocker_from_screen(screen: &str) -> Option<String> {
+    blocker_text(&blocker_lines(screen))
+}
+
+/// A short name for the lines of a dialog. Two screens with the same lines have the same name,
+/// so a caller can say which dialog an answer is for.
+pub(crate) fn dialog_id(lines: &[String]) -> String {
+    // FNV-1a, 64 bit.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in lines.join("\n").bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 #[cfg(test)]
@@ -171,10 +234,42 @@ mod tests {
     }
 
     #[test]
+    fn the_lines_of_a_blocker_keep_their_own_text_and_name_one_dialog() {
+        let screen = "old\n\nPick a / b?\n  \u{276f} 1. Tea\n    2. Coffee\n\n────\n";
+        let lines = blocker_lines(screen);
+        assert_eq!(
+            lines,
+            vec!["old", "Pick a / b?", "\u{276f} 1. Tea", "2. Coffee"]
+        );
+        assert_eq!(
+            blocker_text(&lines).as_deref(),
+            Some("old / Pick a / b? / \u{276f} 1. Tea / 2. Coffee")
+        );
+        let id = dialog_id(&lines);
+        assert_eq!(id.len(), 16);
+        assert_eq!(id, dialog_id(&blocker_lines(screen)));
+        assert_ne!(
+            id,
+            dialog_id(&blocker_lines(
+                "old\nPick a / b?\n\u{276f} 1. Tea\n2. Milk\n"
+            ))
+        );
+        // The cursor mark is part of the dialog: a moved cursor is another screen.
+        assert_ne!(
+            id,
+            dialog_id(&blocker_lines(
+                "old\nPick a / b?\n1. Tea\n\u{276f} 2. Coffee\n"
+            ))
+        );
+        assert!(blocker_lines("  \n───\n").is_empty());
+    }
+
+    #[test]
     fn a_long_blocker_keeps_its_end_where_the_answers_are() {
+        let long_line = "why ".repeat(30);
         let screen = format!(
-            "{}\n1. Yes, I trust this folder\n2. No, exit\n",
-            "why ".repeat(300)
+            "{}1. Yes, I trust this folder\n2. No, exit\n",
+            format!("{long_line}\n").repeat(6)
         );
         let blocker = blocker_from_screen(&screen).unwrap();
         assert!(blocker.starts_with("..."));

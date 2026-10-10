@@ -144,6 +144,19 @@ pub(crate) fn terminal_title_for_presentation(title: &str) -> &str {
 #[cfg(not(windows))]
 fn apply_pane_runtime_marker_platform(_command: &mut portable_pty::CommandBuilder) {}
 
+#[cfg(unix)]
+pub(crate) use unix_common::{isolate_process_group, kill_process_group};
+
+/// Puts a command in a process group of its own where the platform has them.
+#[cfg(not(unix))]
+pub(crate) fn isolate_process_group(_command: &mut std::process::Command) {}
+
+/// Stops a child. Where the platform has no process groups, what the child started keeps running.
+#[cfg(not(unix))]
+pub(crate) fn kill_process_group(child: &mut std::process::Child) {
+    let _ = child.kill();
+}
+
 pub(crate) fn configure_background_command(command: &mut std::process::Command) {
     configure_background_command_platform(command);
 }

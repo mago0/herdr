@@ -26,6 +26,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "wait" => agent_wait(&args[1..]),
         "attach" => agent_attach(&args[1..]),
         "start" => agent_start(&args[1..]),
+        "answer" => super::orchestration::agent_answer(&args[1..]),
         "deliver" => super::orchestration::agent_deliver(&args[1..]),
         "deliveries" => super::orchestration::agent_deliveries(&args[1..]),
         "cancel-delivery" => super::orchestration::agent_cancel_delivery(&args[1..]),
@@ -433,7 +434,8 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
     );
     match waited {
         Ok(Ok(agent)) => {
-            if link_supervisor {
+            // A link that something else made, with its reports, is left as it is.
+            if link_supervisor && agent["supervisor_pane_id"].is_null() {
                 super::orchestration::supervise_from_caller(&pane_id);
             }
             response["result"]["agent"] = agent;
@@ -955,6 +957,7 @@ fn print_agent_help() {
         "  herdr agent start <name> --kind KIND --pane ID [--timeout MS] [--no-supervisor] [-- <agent-args...>]"
     );
     eprintln!("  herdr agent deliver <target> <text> [--source NAME] [--ttl DURATION]");
+    eprintln!("  herdr agent answer <target> <1-9> --dialog ID");
     eprintln!("  herdr agent deliveries [<target>]");
     eprintln!("  herdr agent cancel-delivery <delivery-id>");
     eprintln!("  herdr agent explain <target> [--json|--format text|json] [--verbose]");

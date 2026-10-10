@@ -184,6 +184,15 @@ pub struct AgentPromptParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentAnswerParams {
+    pub target: String,
+    /// One digit from 1 to 9: the number of a choice in the dialog.
+    pub key: String,
+    /// The `dialog` value of the agent record the choice was read from.
+    pub dialog: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentInfo {
     pub terminal_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -237,6 +246,13 @@ pub struct AgentInfo {
     /// What the agent waits for, when it is blocked and the reason is known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocker: Option<String>,
+    /// The last lines of text on the screen of a blocked agent, one entry for each line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocker_lines: Vec<String>,
+    /// Names the dialog a blocked agent shows. `agent.answer` takes it back, and refuses when
+    /// the agent shows something else by then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dialog: Option<String>,
     pub revision: u64,
 }
 

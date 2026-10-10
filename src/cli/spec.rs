@@ -388,6 +388,15 @@ fn agent_command() -> Command {
                 .arg(option("ttl", "DURATION")),
         )
         .subcommand(
+            Command::new("answer")
+                .about("Press the number of a choice in the dialog a blocked agent shows")
+                .arg(required("target", "TARGET"))
+                .arg(required("key", "KEY").value_parser(["1", "2", "3", "4", "5", "6", "7", "8", "9"]))
+                .arg(option("dialog", "ID").required(true).help(
+                    "The dialog value of the agent record; refused when the agent shows another dialog",
+                )),
+        )
+        .subcommand(
             Command::new("deliveries")
                 .about("List deliveries that wait")
                 .arg(Arg::new("target").value_name("TARGET")),

@@ -517,6 +517,7 @@ fn read_events(
         result: crate::api::schema::ResponseResult::EventsRead {
             epoch: event_hub.epoch().to_string(),
             latest: history.latest,
+            next: history.next,
             lost: history.lost,
             events: history
                 .events
@@ -712,6 +713,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PluginPaneFocus(_) => "plugin.pane.focus",
         Method::PluginPaneClose(_) => "plugin.pane.close",
         Method::EventsRead(_) => "events.read",
+        Method::AgentAnswer(_) => "agent.answer",
         Method::AgentDeliver(_) => "agent.deliver",
         Method::AgentDeliveries(_) => "agent.deliveries",
         Method::AgentCancelDelivery(_) => "agent.cancel_delivery",

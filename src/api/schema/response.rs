@@ -282,6 +282,8 @@ pub enum ResponseResult {
         /// Identifies one run of the server. A cursor from another epoch is void.
         epoch: String,
         latest: u64,
+        /// The value to pass as `after` in the next read.
+        next: u64,
         /// The cursor is older than the retained history; reconcile from current state.
         lost: bool,
         events: Vec<super::events::SequencedEvent>,

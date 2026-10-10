@@ -8,6 +8,25 @@ pub(crate) fn classify_child_exit(status: &portable_pty::ExitStatus) -> super::C
     }
 }
 
+/// Puts a command in a process group of its own, so that the command and everything it starts
+/// can be stopped together.
+pub(crate) fn isolate_process_group(command: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+}
+
+/// Stops a child that leads its own process group, and every process still in that group.
+pub(crate) fn kill_process_group(child: &mut std::process::Child) {
+    if let Ok(group) = libc::pid_t::try_from(child.id()) {
+        // SAFETY: `killpg` takes a group id and a signal and touches no memory. A group that is
+        // already gone gives ESRCH, which needs no action.
+        unsafe {
+            libc::killpg(group, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+}
+
 pub(crate) fn read_fd(fd: std::os::fd::RawFd, data: &mut [u8]) -> std::io::Result<usize> {
     let result = unsafe { libc::read(fd, data.as_mut_ptr().cast(), data.len()) };
     if result < 0 {

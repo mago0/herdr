@@ -153,15 +153,22 @@ pub(super) struct SidebarMenuRequest {
     pub(super) y: u16,
     /// The agent pane of the row and the label it has, when the row is one agent.
     pub(super) label_pane: Option<(String, String)>,
-    /// Key and text of each answer of the dialog that agent shows.
-    pub(super) answers: Vec<(String, String)>,
+    /// The dialog that agent shows, by the name the server gave it, with the key and text of each
+    /// of its answers. The server checks the name before it presses a key.
+    pub(super) answers: Option<SidebarMenuAnswers>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SidebarMenuAnswers {
+    pub(super) dialog: String,
+    pub(super) choices: Vec<(String, String)>,
 }
 
 /// What a menu title names: the row, the agent pane with its label, and the answers.
 type MenuTitle = (
     SidebarMenuTarget,
     Option<(String, String)>,
-    Vec<(String, String)>,
+    Option<SidebarMenuAnswers>,
 );
 
 fn menu_target(kind: &str, id: String) -> Option<SidebarMenuTarget> {
@@ -175,7 +182,7 @@ fn menu_target(kind: &str, id: String) -> Option<SidebarMenuTarget> {
 
 /// Reads `herdr-menu;<kind>;<id>;<count>;<agent pane>;<label>`, where the last two parts are
 /// optional and the label is the rest of the title, or `herdr-menu2;<JSON>`, which can also
-/// carry answers.
+/// carry the answers of a dialog.
 fn parse_menu_title(title: &str) -> Option<MenuTitle> {
     if let Some(json) = title.strip_prefix(MENU2_TITLE_PREFIX) {
         return parse_menu2(json);
@@ -188,49 +195,58 @@ fn parse_menu_title(title: &str) -> Option<MenuTitle> {
         .next()
         .filter(|pane| !pane.is_empty())
         .map(|pane| (pane.to_owned(), parts.next().unwrap_or_default().to_owned()));
-    Some((target, label_pane, Vec::new()))
+    Some((target, label_pane, None))
 }
 
 const MAX_MENU_ANSWERS: usize = 6;
 const MAX_ANSWER_CHARS: usize = 40;
 
 fn parse_menu2(json: &str) -> Option<MenuTitle> {
-    #[derive(serde::Deserialize)]
-    struct Answer {
-        key: String,
-        #[serde(default)]
-        text: String,
-    }
+    // The keys are one letter each, because a pane title holds 256 characters.
     #[derive(serde::Deserialize)]
     struct Menu {
-        kind: String,
-        id: String,
+        /// What the row shows: workspace, tab or pane.
+        t: String,
+        /// The id of that workspace, tab or pane.
+        i: String,
+        /// The pane of the row's agent.
         #[serde(default)]
-        agent_pane: String,
+        p: String,
+        /// The label that pane has.
         #[serde(default)]
-        label: String,
+        l: String,
+        /// The name the server gave the dialog the agent shows.
         #[serde(default)]
-        answers: Vec<Answer>,
+        d: String,
+        /// Key and text of each answer of that dialog.
+        #[serde(default)]
+        a: Vec<(String, String)>,
     }
     let menu: Menu = serde_json::from_str(json).ok()?;
-    let target = menu_target(&menu.kind, menu.id)?;
-    let label_pane = (!menu.agent_pane.is_empty()).then_some((menu.agent_pane, menu.label));
+    let target = menu_target(&menu.t, menu.i)?;
+    let label_pane = (!menu.p.is_empty()).then_some((menu.p, menu.l));
     // A plugin can only make the client press one digit. Any other key is left out.
-    let answers = menu
-        .answers
+    let choices: Vec<(String, String)> = menu
+        .a
         .into_iter()
-        .filter(|answer| matches!(answer.key.as_bytes(), [b'1'..=b'9']))
+        .filter(|(key, _)| matches!(key.as_bytes(), [b'1'..=b'9']))
         .take(MAX_MENU_ANSWERS)
-        .map(|answer| {
-            let text = answer
-                .text
+        .map(|(key, text)| {
+            let text = text
                 .chars()
                 .filter(|c| !c.is_control())
                 .take(MAX_ANSWER_CHARS)
                 .collect();
-            (answer.key, text)
+            (key, text)
         })
         .collect();
+    // An answer needs an agent pane to press the key in and a dialog name for the server to check.
+    let answers = (label_pane.is_some() && !menu.d.is_empty() && !choices.is_empty()).then_some(
+        SidebarMenuAnswers {
+            dialog: menu.d,
+            choices,
+        },
+    );
     Some((target, label_pane, answers))
 }
 

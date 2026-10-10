@@ -1321,6 +1321,27 @@
     },
     "request": {
       "$defs": {
+        "AgentAnswerParams": {
+          "properties": {
+            "dialog": {
+              "description": "The `dialog` value of the agent record the choice was read from.",
+              "type": "string"
+            },
+            "key": {
+              "description": "One digit from 1 to 9: the number of a choice in the dialog.",
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "key",
+            "dialog"
+          ],
+          "type": "object"
+        },
         "AgentCancelDeliveryParams": {
           "properties": {
             "delivery_id": {
@@ -5747,6 +5768,22 @@
         {
           "properties": {
             "method": {
+              "const": "agent.answer",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentAnswerParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.deliver",
               "type": "string"
             },
@@ -7023,6 +7060,13 @@
                 "null"
               ]
             },
+            "blocker_lines": {
+              "description": "The last lines of text on the screen of a blocked agent, one entry for each line.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "completion_seq": {
               "description": "The current idle transition completed work, independently of who has viewed it.",
               "format": "uint64",
@@ -7033,6 +7077,13 @@
               ]
             },
             "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dialog": {
+              "description": "Names the dialog a blocked agent shows. `agent.answer` takes it back, and refuses when\nthe agent shows something else by then.",
               "type": [
                 "string",
                 "null"
@@ -11164,6 +11215,12 @@
                   "description": "The cursor is older than the retained history; reconcile from current state.",
                   "type": "boolean"
                 },
+                "next": {
+                  "description": "The value to pass as `after` in the next read.",
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
                 "type": {
                   "const": "events_read",
                   "type": "string"
@@ -11173,6 +11230,7 @@
                 "type",
                 "epoch",
                 "latest",
+                "next",
                 "lost",
                 "events"
               ],

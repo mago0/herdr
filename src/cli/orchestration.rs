@@ -1,8 +1,8 @@
 //! Commands for deliveries, supervision links, jobs and event history.
 
 use crate::api::schema::{
-    AgentCancelDeliveryParams, AgentDeliverParams, AgentDeliveriesParams, EmptyParams,
-    EventsReadParams, JobAddParams, JobTarget, Method, PaneSuperviseParams, Request,
+    AgentAnswerParams, AgentCancelDeliveryParams, AgentDeliverParams, AgentDeliveriesParams,
+    EmptyParams, EventsReadParams, JobAddParams, JobTarget, Method, PaneSuperviseParams, Request,
     SuperviseReport,
 };
 
@@ -243,6 +243,40 @@ pub(super) fn agent_deliver(args: &[String]) -> std::io::Result<i32> {
     }
 }
 
+pub(super) fn parse_answer(args: &[String]) -> Result<AgentAnswerParams, String> {
+    const USAGE: &str = "usage: herdr agent answer <target> <1-9> --dialog ID";
+    let (mut positional, mut dialog) = (Vec::new(), None);
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--dialog" => {
+                dialog = Some(value_of(args, index, "--dialog")?.clone());
+                index += 2;
+            }
+            other if other.starts_with("--") => return Err(format!("unknown option: {other}")),
+            _ => {
+                positional.push(args[index].clone());
+                index += 1;
+            }
+        }
+    }
+    match (positional.as_slice(), dialog) {
+        ([target, key], Some(dialog)) => Ok(AgentAnswerParams {
+            target: target.clone(),
+            key: key.clone(),
+            dialog,
+        }),
+        _ => Err(USAGE.into()),
+    }
+}
+
+pub(super) fn agent_answer(args: &[String]) -> std::io::Result<i32> {
+    match parse_answer(args) {
+        Ok(params) => send("cli:agent:answer", Method::AgentAnswer(params)),
+        Err(message) => usage_error(message),
+    }
+}
+
 pub(super) fn agent_deliveries(args: &[String]) -> std::io::Result<i32> {
     let target = match args {
         [] => None,
@@ -414,6 +448,22 @@ mod tests {
         assert!(parse_deliver(&args(&["lead", "a", "b"])).is_err());
         assert!(parse_deliver(&args(&["lead", "a", "--bogus"])).is_err());
         assert!(parse_deliver(&args(&["lead", "a", "--ttl"])).is_err());
+    }
+
+    #[test]
+    fn answer_takes_a_target_a_key_and_the_dialog_it_is_for() {
+        let params = parse_answer(&args(&["worker", "2", "--dialog", "d1a109"])).unwrap();
+        assert_eq!(
+            params,
+            AgentAnswerParams {
+                target: "worker".into(),
+                key: "2".into(),
+                dialog: "d1a109".into(),
+            }
+        );
+        assert!(parse_answer(&args(&["worker", "2"])).is_err());
+        assert!(parse_answer(&args(&["worker", "--dialog", "d1a109"])).is_err());
+        assert!(parse_answer(&args(&["worker", "2", "--dialog"])).is_err());
     }
 
     #[test]

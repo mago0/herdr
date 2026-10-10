@@ -355,6 +355,64 @@ impl App {
         encode_success(id, ResponseResult::AgentExplain { explain: value })
     }
 
+    /// Presses the number of a choice in the dialog a blocked agent shows, when the agent still
+    /// shows the dialog the caller read the choice from.
+    pub(super) fn handle_agent_answer(
+        &mut self,
+        id: String,
+        params: crate::api::schema::AgentAnswerParams,
+    ) -> String {
+        if !matches!(params.key.as_bytes(), [b'1'..=b'9']) {
+            return encode_error(
+                id,
+                "invalid_answer_key",
+                "an answer key is one digit from 1 to 9",
+            );
+        }
+        let resolved = match self.resolve_agent_target(&params.target) {
+            Ok(resolved) => resolved,
+            Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
+        };
+        let Some(terminal_id) = self
+            .state
+            .workspaces
+            .get(resolved.ws_idx)
+            .and_then(|workspace| workspace.terminal_id(resolved.pane_id))
+            .cloned()
+        else {
+            return agent_not_found(id, &params.target);
+        };
+        let blocked = self
+            .state
+            .terminals
+            .get(&terminal_id)
+            .is_some_and(|terminal| terminal.state == crate::detect::AgentState::Blocked);
+        if !blocked {
+            return encode_error(
+                id,
+                "agent_not_blocked",
+                format!("agent {} shows no dialog", params.target),
+            );
+        }
+        if self.current_dialog(&terminal_id).as_deref() != Some(params.dialog.as_str()) {
+            return encode_error(
+                id,
+                "dialog_changed",
+                format!(
+                    "agent {} shows another dialog than the one the answer is for",
+                    params.target
+                ),
+            );
+        }
+        self.handle_agent_send_keys(
+            id,
+            AgentSendKeysParams {
+                target: params.target,
+                keys: vec![params.key],
+            },
+        )
+    }
+
     pub(super) fn handle_agent_send_keys(
         &mut self,
         id: String,

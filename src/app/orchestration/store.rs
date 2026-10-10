@@ -46,8 +46,31 @@ pub(super) struct StoredDelivery {
 pub(super) struct StoredLink {
     pub(super) pane_id: String,
     pub(super) supervisor_pane_id: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "known_reports"
+    )]
     pub(super) report: Vec<SuperviseReport>,
+}
+
+/// Reads the report kinds this build knows and leaves out the others.
+fn known_reports<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<SuperviseReport>, D::Error> {
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect())
+}
+
+fn default_timeout_ms() -> u64 {
+    super::jobs::DEFAULT_TIMEOUT_MS
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,9 +91,11 @@ pub(super) struct StoredJob {
     pub(super) target_pane_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) owner_pane_id: Option<String>,
+    #[serde(default = "default_timeout_ms")]
     pub(super) timeout_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) until_ms: Option<u64>,
+    #[serde(default = "default_true")]
     pub(super) dedupe: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) last_news: Option<String>,
@@ -85,29 +110,41 @@ impl StoredState {
     }
 }
 
-/// A missing file, a file this build cannot read, and a file from a newer build all load as empty.
+/// A missing file loads as empty. A file this build cannot read, or one from a newer build, is
+/// renamed aside before it loads as empty, so that the next save does not replace it.
 pub(super) fn load(path: &Path) -> StoredState {
     let Ok(text) = std::fs::read_to_string(path) else {
         return StoredState::default();
     };
-    match serde_json::from_str::<StoredState>(&text) {
-        Ok(state) if state.version <= STORE_VERSION => state,
-        Ok(state) => {
-            tracing::warn!(
-                version = state.version,
-                path = %path.display(),
-                "orchestration state is from a newer build; ignored"
-            );
-            StoredState::default()
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, path = %path.display(), "orchestration state is unreadable; ignored");
-            StoredState::default()
-        }
+    let reason = match serde_json::from_str::<StoredState>(&text) {
+        Ok(state) if state.version <= STORE_VERSION => return state,
+        Ok(state) => format!("it is version {} from a newer build", state.version),
+        Err(err) => err.to_string(),
+    };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let aside = path.with_extension(format!("json.unread-{stamp}"));
+    match std::fs::rename(path, &aside) {
+        Ok(()) => tracing::warn!(
+            reason = %reason,
+            kept = %aside.display(),
+            "orchestration state was not read; the file is kept aside"
+        ),
+        Err(err) => tracing::warn!(
+            reason = %reason,
+            error = %err,
+            path = %path.display(),
+            "orchestration state was not read and could not be set aside"
+        ),
     }
+    StoredState::default()
 }
 
 pub(super) fn save(path: &Path, state: &StoredState) -> std::io::Result<()> {
+    use std::io::Write;
+
     if state.is_empty() {
         return match std::fs::remove_file(path) {
             Err(err) if err.kind() != std::io::ErrorKind::NotFound => Err(err),
@@ -119,9 +156,15 @@ pub(super) fn save(path: &Path, state: &StoredState) -> std::io::Result<()> {
     }
     let mut state = state.clone();
     state.version = STORE_VERSION;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(&state)?)?;
-    if let Err(err) = std::fs::rename(&tmp, path) {
+    let json = serde_json::to_string_pretty(&state)?;
+    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    // The file holds prompt text and job environment values, so only its owner may read it.
+    let written = crate::platform::create_config_temporary(&tmp, true).and_then(|mut file| {
+        file.write_all(json.as_bytes())?;
+        file.sync_all()
+    });
+    if let Err(err) = written.and_then(|()| std::fs::rename(&tmp, path)) {
         let _ = std::fs::remove_file(&tmp);
         return Err(err);
     }
@@ -203,14 +246,67 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_broken_or_newer_file_loads_as_empty() {
-        let dir = TestDir::new("broken");
+    fn a_missing_file_loads_as_empty() {
+        let dir = TestDir::new("missing");
         let path = dir.path().join(STORE_FILE);
         assert_eq!(load(&path), StoredState::default());
-        std::fs::write(&path, "{ not json").unwrap();
-        assert_eq!(load(&path), StoredState::default());
-        std::fs::write(&path, r#"{"version": 99, "links": []}"#).unwrap();
-        assert_eq!(load(&path), StoredState::default());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_file_this_build_cannot_read_is_set_aside_and_not_lost() {
+        for (name, content) in [
+            ("broken", "{ not json"),
+            ("newer", r#"{"version": 99, "links": [], "future": true}"#),
+        ] {
+            let dir = TestDir::new(name);
+            let path = dir.path().join(STORE_FILE);
+            std::fs::write(&path, content).unwrap();
+            assert_eq!(load(&path), StoredState::default(), "{name}");
+            assert!(
+                !path.exists(),
+                "{name}: the file must not stay where a save replaces it"
+            );
+            // A save after the refused load must leave the old content on disk.
+            save(&path, &state()).unwrap();
+            let kept = std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .find(|kept| kept != &path)
+                .unwrap_or_else(|| panic!("{name}: nothing was set aside"));
+            assert_eq!(std::fs::read_to_string(kept).unwrap(), content, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_job_or_link_saved_with_a_part_this_build_does_not_know_still_loads() {
+        let dir = TestDir::new("lenient");
+        let path = dir.path().join(STORE_FILE);
+        std::fs::write(
+            &path,
+            r#"{"version":1,
+                "links":[{"pane_id":"w2:p1","supervisor_pane_id":"w1:p2","report":["blocked","paused"]}],
+                "jobs":[{"name":"old","command":["true"]}]}"#,
+        )
+        .unwrap();
+        let loaded = load(&path);
+        assert_eq!(loaded.links[0].report, vec![SuperviseReport::Blocked]);
+        assert_eq!(loaded.jobs[0].timeout_ms, 60_000);
+        assert!(loaded.jobs[0].dedupe);
+        assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_saved_file_is_readable_by_its_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TestDir::new("mode");
+        let path = dir.path().join(STORE_FILE);
+        save(&path, &state()).unwrap();
+        save(&path, &state()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

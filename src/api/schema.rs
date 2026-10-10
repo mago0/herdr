@@ -143,6 +143,8 @@ pub enum Method {
     AgentPrompt(AgentPromptParams),
     #[serde(rename = "agent.wait")]
     AgentWait(AgentWaitParams),
+    #[serde(rename = "agent.answer")]
+    AgentAnswer(AgentAnswerParams),
     #[serde(rename = "agent.deliver")]
     AgentDeliver(AgentDeliverParams),
     #[serde(rename = "agent.deliveries")]

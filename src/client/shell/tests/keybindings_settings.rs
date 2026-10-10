@@ -1214,9 +1214,10 @@ async fn sidebar_plugin_row_menu_answers_a_blocked_agent_with_the_key_of_the_ans
     let mut config = Config::default();
     config.ui.sidebar.spaces.plugin = "fake:pane".into();
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
-    // The second title form is JSON: the row, the pane of its agent, and the answers of its dialog.
+    // The second title form is JSON with short keys, because a pane title holds 256 characters:
+    // t and i name the row, p is the pane of its agent, l its label, d the dialog, a the answers.
     state.set_sidebar_plugin_resolver(fake_sidebar_plugin(
-        "printf '\\033[?1000h\\033[?1006hREADY'; stty raw -echo; while :; do c=$(dd bs=1 count=1 2>/dev/null); case \"$c\" in M) printf '\\033]2;herdr-menu2;{\"kind\":\"workspace\",\"id\":\"ws_1\",\"agent_pane\":\"pane_1\",\"label\":\"OLD-1\",\"answers\":[{\"key\":\"1\",\"text\":\"Tea\"},{\"key\":\"2\",\"text\":\"Coffee\"}]}\\007DONE';; esac; done",
+        "printf '\\033[?1000h\\033[?1006hREADY'; stty raw -echo; while :; do c=$(dd bs=1 count=1 2>/dev/null); case \"$c\" in M) printf '\\033]2;herdr-menu2;{\"t\":\"workspace\",\"i\":\"ws_1\",\"p\":\"pane_1\",\"l\":\"OLD-1\",\"d\":\"d1a109\",\"a\":[[\"1\",\"Tea\"],[\"2\",\"Coffee\"]]}\\007DONE';; esac; done",
     ));
     state.set_snapshot(Box::new(snapshot()));
     sidebar_text_when(&mut state, |text| text.contains("READY")).await;
@@ -1237,21 +1238,33 @@ async fn sidebar_plugin_row_menu_answers_a_blocked_agent_with_the_key_of_the_ans
             .collect::<Vec<_>>(),
         other => panic!("context menu, got {other:?}"),
     };
-    assert!(labels.contains(&"Label...".to_string()), "{labels:?}");
-    // The answers come first: they are why a person opens the menu of a blocked row.
-    assert_eq!(&labels[..2], ["Answer: 1. Tea", "Answer: 2. Coffee"]);
+    // The first item, which Enter picks in a menu that just opened, is never an answer.
+    assert_eq!(
+        labels,
+        [
+            "Rename",
+            "Close",
+            "New worktree",
+            "Open worktree...",
+            "Answer: 1. Tea",
+            "Answer: 2. Coffee",
+            "Label..."
+        ]
+    );
 
     let mut outcome = ClientShellInput::default();
-    state.activate_context_menu_item(1, &mut outcome);
+    state.activate_context_menu_item(5, &mut outcome);
     let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
         panic!("one endpoint request, got {:?}", outcome.actions);
     };
     match &request.method {
-        crate::api::schema::Method::AgentSendKeys(params) => {
+        crate::api::schema::Method::AgentAnswer(params) => {
             assert_eq!(params.target, "pane_1");
-            assert_eq!(params.keys, vec!["2".to_string()]);
+            assert_eq!(params.key, "2");
+            // The server compares this with what the agent shows at that moment.
+            assert_eq!(params.dialog, "d1a109");
         }
-        other => panic!("agent send keys, got {other:?}"),
+        other => panic!("agent answer, got {other:?}"),
     }
     assert!(state.overlay.is_none());
 }
@@ -1262,7 +1275,7 @@ async fn sidebar_plugin_menu_ignores_answers_that_are_not_one_plain_key() {
     config.ui.sidebar.spaces.plugin = "fake:pane".into();
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
     state.set_sidebar_plugin_resolver(fake_sidebar_plugin(
-        "printf '\\033[?1000h\\033[?1006hREADY'; stty raw -echo; while :; do c=$(dd bs=1 count=1 2>/dev/null); case \"$c\" in M) printf '\\033]2;herdr-menu2;{\"kind\":\"workspace\",\"id\":\"ws_1\",\"agent_pane\":\"pane_1\",\"answers\":[{\"key\":\"ctrl+c\",\"text\":\"Stop\"},{\"key\":\"12\",\"text\":\"Two keys\"},{\"key\":\"3\",\"text\":\"Fine\"}]}\\007DONE';; esac; done",
+        "printf '\\033[?1000h\\033[?1006hREADY'; stty raw -echo; while :; do c=$(dd bs=1 count=1 2>/dev/null); case \"$c\" in M) printf '\\033]2;herdr-menu2;{\"t\":\"workspace\",\"i\":\"ws_1\",\"p\":\"pane_1\",\"d\":\"d1a109\",\"a\":[[\"ctrl+c\",\"Stop\"],[\"12\",\"Two\"],[\"y\",\"Letter\"],[\"0\",\"Zero\"],[\" \",\"Space\"],[\"\",\"None\"],[\"3\",\"Fine\"]]}\\007DONE';; esac; done",
     ));
     state.set_snapshot(Box::new(snapshot()));
     sidebar_text_when(&mut state, |text| text.contains("READY")).await;
@@ -1284,6 +1297,37 @@ async fn sidebar_plugin_menu_ignores_answers_that_are_not_one_plain_key() {
                 .filter(|label| label.starts_with("Answer"))
                 .collect::<Vec<_>>();
             assert_eq!(answers, ["Answer: 3. Fine"]);
+        }
+        other => panic!("context menu, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sidebar_plugin_menu_has_no_answers_when_the_plugin_names_no_dialog() {
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = "fake:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_sidebar_plugin_resolver(fake_sidebar_plugin(
+        "printf '\\033[?1000h\\033[?1006hREADY'; stty raw -echo; while :; do c=$(dd bs=1 count=1 2>/dev/null); case \"$c\" in M) printf '\\033]2;herdr-menu2;{\"t\":\"workspace\",\"i\":\"ws_1\",\"p\":\"pane_1\",\"a\":[[\"1\",\"Yes\"]]}\\007DONE';; esac; done",
+    ));
+    state.set_snapshot(Box::new(snapshot()));
+    sidebar_text_when(&mut state, |text| text.contains("READY")).await;
+    let body = state.hits.sidebar_plugins[0];
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: body.x + 3,
+        row: body.y + 1,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    sidebar_text_when(&mut state, |text| text.contains("DONE")).await;
+    state.tick_sidebar_plugins(std::time::Instant::now());
+    match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => {
+            // Without the name of the dialog the server cannot check an answer, so none is shown.
+            assert!(menu
+                .items()
+                .iter()
+                .all(|item| !item.label.starts_with("Answer")))
         }
         other => panic!("context menu, got {other:?}"),
     }

@@ -567,8 +567,8 @@ pub(super) struct ClientContextMenuOverlay {
     pub(super) highlighted: usize,
     /// The agent pane of a sidebar plugin row and the label it has. It adds the label item.
     pub(super) label_pane: Option<(String, String)>,
-    /// Key and text of each answer of the dialog that agent shows. Each adds an answer item.
-    pub(super) answers: Vec<(String, String)>,
+    /// The answers of the dialog that agent shows. Each adds an answer item.
+    pub(super) answers: Option<super::sidebar_plugins::SidebarMenuAnswers>,
 }
 
 pub(super) struct ClientContextMenuItem {

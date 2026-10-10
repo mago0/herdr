@@ -1977,6 +1977,12 @@ impl App {
         }
         let workspace_snapshot = self.workspace_info(ws_idx);
         let terminal_id = self.state.terminal_id_for_pane(ws_idx, pane_id);
+        // The last pane of a main checkout takes its whole worktree group with it.
+        let group_panes: Vec<(String, String)> = self
+            .public_pane_ids_closed_with_workspace(ws_idx)
+            .into_iter()
+            .filter(|(closed, _)| closed != &public_pane_id)
+            .collect();
         let should_close_workspace = {
             let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
                 return Err(pane_not_found(id, &target.pane_id));
@@ -1995,6 +2001,7 @@ impl App {
                     workspace_id: workspace_id.clone(),
                 },
             });
+            self.emit_panes_closed(group_panes);
             self.emit_event(EventEnvelope {
                 event: EventKind::WorkspaceClosed,
                 data: EventData::WorkspaceClosed {

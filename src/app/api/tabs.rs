@@ -242,6 +242,8 @@ impl App {
                 );
             }
             let workspace = self.workspace_info(ws_idx);
+            // The last tab of a main checkout takes its whole worktree group with it.
+            let closed_panes = self.public_pane_ids_closed_with_workspace(ws_idx);
             self.state.selected = ws_idx;
             self.state.close_selected_workspace();
             self.state.remove_plugin_pane_records(pane_ids);

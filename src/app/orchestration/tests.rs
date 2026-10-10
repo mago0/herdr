@@ -201,7 +201,7 @@ async fn a_delivery_to_a_blocked_agent_waits_until_it_is_not_blocked() {
     f.tick();
     assert_eq!(typed(&mut f.worker_rx).await, "");
 
-    f.worker_state(AgentState::Working);
+    f.worker_state(AgentState::Idle);
     f.app.run_orchestration_tick(Instant::now());
     assert_eq!(typed(&mut f.worker_rx).await, "continue\r");
 }
@@ -221,6 +221,88 @@ async fn deliveries_to_one_pane_are_typed_one_at_a_time_in_order() {
     f.tick();
     assert_eq!(typed(&mut f.worker_rx).await, "");
     assert_eq!(f.agent(1, f.worker).pending_deliveries, None);
+}
+
+#[tokio::test]
+async fn a_second_delivery_waits_while_the_first_is_being_written() {
+    let mut f = fixture();
+    // No await between the two: the first has its text out and its Enter still to come.
+    assert_eq!(f.deliver("worker", "first").state, DeliveryState::Delivered);
+    assert_eq!(f.deliver("worker", "second").state, DeliveryState::Queued);
+    f.tick();
+    assert_eq!(typed(&mut f.worker_rx).await, "first\r");
+    f.tick();
+    assert_eq!(typed(&mut f.worker_rx).await, "second\r");
+}
+
+#[tokio::test]
+async fn delivery_text_is_typed_with_its_control_characters_removed() {
+    let mut f = fixture();
+    let delivery = f.deliver("worker", "note\x1b[201~\r\x03 end");
+    assert_eq!(delivery.text, "note[201~ end");
+    assert_eq!(typed(&mut f.worker_rx).await, "note[201~ end\r");
+
+    let only_controls = f.app.handle_agent_deliver(
+        "req".into(),
+        AgentDeliverParams {
+            target: "worker".into(),
+            text: "\x1b\r".into(),
+            source: None,
+            ttl_ms: None,
+        },
+    );
+    assert_eq!(error_code(&only_controls), "empty_delivery");
+}
+
+#[tokio::test]
+async fn a_delivery_waits_while_the_agent_works_and_is_typed_when_it_waits_for_input() {
+    let mut f = fixture();
+    f.worker_state(AgentState::Working);
+    assert_eq!(f.deliver("worker", "wake").state, DeliveryState::Queued);
+    f.tick();
+    assert_eq!(typed(&mut f.worker_rx).await, "");
+
+    f.worker_state(AgentState::Idle);
+    f.app.run_orchestration_tick(Instant::now());
+    assert_eq!(typed(&mut f.worker_rx).await, "wake\r");
+}
+
+#[tokio::test]
+async fn a_delivery_waits_while_the_pane_holds_text_that_was_typed_and_not_sent() {
+    let mut f = fixture();
+    let terminal = f.terminal(1, f.worker);
+    f.app.orchestration.note_pane_draft(&terminal, Some(true));
+    assert_eq!(f.deliver("worker", "wake").state, DeliveryState::Queued);
+    f.tick();
+    assert_eq!(typed(&mut f.worker_rx).await, "");
+
+    // Keys that say nothing sure about the text change nothing.
+    f.app.orchestration.note_pane_draft(&terminal, None);
+    f.tick();
+    assert_eq!(typed(&mut f.worker_rx).await, "");
+
+    f.app.orchestration.note_pane_draft(&terminal, Some(false));
+    f.tick();
+    assert_eq!(typed(&mut f.worker_rx).await, "wake\r");
+}
+
+#[tokio::test]
+async fn a_pane_with_a_full_queue_refuses_a_delivery() {
+    let mut f = fixture();
+    f.worker_state(AgentState::Working);
+    for _ in 0..deliveries::MAX_PENDING_PER_TERMINAL {
+        f.deliver("worker", "held");
+    }
+    let refused = f.app.handle_agent_deliver(
+        "req".into(),
+        AgentDeliverParams {
+            target: "worker".into(),
+            text: "one more".into(),
+            source: None,
+            ttl_ms: None,
+        },
+    );
+    assert_eq!(error_code(&refused), "delivery_queue_full");
 }
 
 #[tokio::test]
@@ -244,6 +326,54 @@ async fn deliveries_of_a_closed_pane_are_dropped() {
     f.app.state.active = Some(0);
     f.tick();
     assert_eq!(f.app.orchestration.deliveries.iter().count(), 0);
+}
+
+#[tokio::test]
+async fn a_delivery_past_its_time_limit_is_dropped_with_an_event_and_stays_dropped_after_a_reload()
+{
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-orchestration-ttl-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let path = dir.join(store::STORE_FILE);
+    let mut f = fixture();
+    f.app.orchestration = Orchestration::new(Some(path.clone()), 600);
+    let held = f.app.handle_agent_deliver(
+        "req".into(),
+        AgentDeliverParams {
+            target: "lead".into(),
+            text: "short lived".into(),
+            source: None,
+            ttl_ms: Some(40),
+        },
+    );
+    assert!(serde_json::from_str::<SuccessResponse>(&held).is_ok());
+    f.app.save_orchestration_now();
+
+    // The time limit is kept in the file, so a restart does not make the delivery last forever.
+    f.app.orchestration = Orchestration::new(Some(path), 600);
+    f.app.ensure_orchestration_loaded();
+    assert_eq!(f.agent(0, f.supervisor).pending_deliveries, Some(1));
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let before = f.app.event_hub.current_sequence();
+    f.tick();
+    assert_eq!(f.agent(0, f.supervisor).pending_deliveries, None);
+    let pending = f
+        .app
+        .event_hub
+        .events_after(before)
+        .into_iter()
+        .filter_map(|(_, event)| match event.data {
+            EventData::PaneDeliveryChanged { pending, .. } => Some(pending),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(pending, vec![0]);
+    f.app.state.active = Some(1);
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "");
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
@@ -542,6 +672,7 @@ async fn queued_deliveries_and_links_come_back_from_the_state_file() {
     f.app.orchestration = Orchestration::new(Some(path.clone()), 600);
     f.supervise(vec![SuperviseReport::Blocked, SuperviseReport::Exited]);
     f.deliver("lead", "held while focused");
+    f.app.save_orchestration_now();
     assert!(path.exists());
 
     f.app.orchestration = Orchestration::new(Some(path.clone()), 600);
@@ -561,6 +692,7 @@ async fn queued_deliveries_and_links_come_back_from_the_state_file() {
     f.tick();
     assert_eq!(typed(&mut f.supervisor_rx).await, "held while focused\r");
     f.tick();
+    f.app.save_orchestration_now();
     assert!(
         store::load(&path).deliveries.is_empty(),
         "a delivery that was typed must not be typed again after a restart"
@@ -719,6 +851,88 @@ async fn a_job_past_its_time_limit_is_stopped_and_has_no_news() {
     assert_eq!(typed(&mut f.worker_rx).await, "");
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_ends_when_its_command_exits_and_a_process_it_left_keeps_its_output_open() {
+    let mut f = fixture();
+    f.add_job(job("leaver", "sleep 30 & echo up"));
+    f.tick();
+    f.wait_for_runs("leaver", 1).await;
+    assert_eq!(f.job_info("leaver").last_exit, Some(0));
+    assert_eq!(typed(&mut f.worker_rx).await, "up\r");
+}
+
+#[cfg(unix)]
+fn process_runs(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_a_job_stops_its_running_command_and_what_that_command_started() {
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-orchestration-kill-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pids = dir.join("pids");
+    let mut f = fixture();
+    f.add_job(job(
+        "long",
+        &format!("sleep 60 & echo $! $$ > {}; wait", pids.display()),
+    ));
+    f.tick();
+    let mut started = String::new();
+    for _ in 0..100 {
+        started = std::fs::read_to_string(&pids).unwrap_or_default();
+        if started.split_whitespace().count() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let started: Vec<&str> = started.split_whitespace().collect();
+    assert_eq!(started.len(), 2, "the command did not start");
+    assert!(started.iter().all(|pid| process_runs(pid)));
+
+    let response = f.app.handle_job_remove(
+        "req".into(),
+        JobTarget {
+            name: "long".into(),
+        },
+    );
+    assert!(serde_json::from_str::<SuccessResponse>(&response).is_ok());
+    for _ in 0..100 {
+        if !started.iter().any(|pid| process_runs(pid)) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        !started.iter().any(|pid| process_runs(pid)),
+        "the command or its child still runs"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_whose_folder_is_gone_does_not_run_somewhere_else() {
+    let mut f = fixture();
+    f.add_job(JobAddParams {
+        cwd: Some("/nonexistent/herdr-orchestration".into()),
+        ..job("lost", "echo ran in $PWD")
+    });
+    f.tick();
+    f.wait_for_runs("lost", 1).await;
+    assert_eq!(f.job_info("lost").last_exit, None);
+    assert_eq!(typed(&mut f.worker_rx).await, "");
+}
+
 #[tokio::test]
 async fn a_job_is_removed_when_its_owner_or_target_pane_closes() {
     let mut f = fixture();
@@ -792,9 +1006,15 @@ async fn jobs_come_back_from_the_state_file_with_their_last_news() {
         on_events: vec!["pane.closed".into()],
         ..job("kept", "echo red")
     });
-    let run = f.app.orchestration.jobs.begin("kept", None).unwrap();
+    let run = f
+        .app
+        .orchestration
+        .jobs
+        .begin("kept", None, Instant::now())
+        .unwrap();
     f.app
         .handle_job_finished("kept", run.run_id, Some(0), "red\n");
+    f.app.save_orchestration_now();
 
     f.app.orchestration = Orchestration::new(Some(path), 600);
     f.app.ensure_orchestration_loaded();
@@ -837,7 +1057,7 @@ async fn pane_tokens_without_a_time_limit_come_back_from_the_state_file() {
     };
     report(&mut f, "label", "SRE-194", None);
     report(&mut f, "progress", "3/5", Some(60_000));
-    f.tick();
+    f.app.save_orchestration_now();
 
     let terminal = f.terminal(1, f.worker);
     f.app
@@ -852,4 +1072,97 @@ async fn pane_tokens_without_a_time_limit_come_back_from_the_state_file() {
     assert_eq!(tokens.get("label").map(String::as_str), Some("SRE-194"));
     assert_eq!(tokens.get("progress"), None);
     let _ = std::fs::remove_dir_all(dir);
+}
+
+impl Fixture {
+    fn show_on_worker(&mut self, text: &str) {
+        self.app
+            .lookup_runtime_sender(1, self.worker)
+            .unwrap()
+            .test_process_pty_bytes(text.as_bytes());
+    }
+
+    fn answer(&mut self, key: &str, dialog: &str) -> String {
+        let request = serde_json::json!({
+            "id": "req",
+            "method": "agent.answer",
+            "params": { "target": "worker", "key": key, "dialog": dialog },
+        });
+        self.app
+            .handle_api_request(serde_json::from_value(request).unwrap())
+    }
+}
+
+const DIALOG_A: &str = "Run rm -rf build?\r\n\u{276f} 1. Yes\r\n  2. No\r\n";
+
+#[tokio::test]
+async fn an_answer_presses_its_key_when_the_agent_still_shows_the_same_dialog() {
+    let mut f = fixture();
+    f.show_on_worker(DIALOG_A);
+    f.worker_state(AgentState::Blocked);
+    let agent = f.agent(1, f.worker);
+    assert_eq!(
+        agent.blocker_lines,
+        vec!["Run rm -rf build?", "\u{276f} 1. Yes", "2. No"]
+    );
+    let dialog = agent.dialog.expect("a blocked agent names its dialog");
+
+    let response = f.answer("2", &dialog);
+    assert!(
+        serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+        "{response}"
+    );
+    assert_eq!(typed_keys(&mut f.worker_rx), "2");
+}
+
+#[tokio::test]
+async fn an_answer_is_refused_when_the_agent_shows_another_dialog_now() {
+    let mut f = fixture();
+    f.show_on_worker(DIALOG_A);
+    f.worker_state(AgentState::Blocked);
+    let old = f.agent(1, f.worker).dialog.unwrap();
+
+    // The agent moved to a second dialog with no state change in between.
+    f.show_on_worker(
+        "\x1b[2J\x1b[HAlways allow rm?\r\n\u{276f} 1. Yes, and do not ask again\r\n  2. No\r\n",
+    );
+    assert_eq!(error_code(&f.answer("1", &old)), "dialog_changed");
+    assert_eq!(typed_keys(&mut f.worker_rx), "");
+
+    // The record follows the screen, so a menu made after the change can answer.
+    f.tick();
+    let agent = f.agent(1, f.worker);
+    assert_eq!(agent.blocker_lines[0], "Always allow rm?");
+    let new = agent.dialog.unwrap();
+    assert_ne!(new, old);
+    assert!(serde_json::from_str::<SuccessResponse>(&f.answer("2", &new)).is_ok());
+    assert_eq!(typed_keys(&mut f.worker_rx), "2");
+}
+
+#[tokio::test]
+async fn an_answer_is_refused_when_the_agent_is_not_blocked_or_the_key_is_not_one_digit() {
+    let mut f = fixture();
+    f.show_on_worker(DIALOG_A);
+    f.worker_state(AgentState::Blocked);
+    let dialog = f.agent(1, f.worker).dialog.unwrap();
+    for key in ["0", "12", "y", "enter", "ctrl+c", "\u{3}", ""] {
+        assert_eq!(
+            error_code(&f.answer(key, &dialog)),
+            "invalid_answer_key",
+            "{key:?}"
+        );
+    }
+    f.worker_state(AgentState::Idle);
+    assert_eq!(f.agent(1, f.worker).dialog, None);
+    assert_eq!(error_code(&f.answer("1", &dialog)), "agent_not_blocked");
+    assert_eq!(typed_keys(&mut f.worker_rx), "");
+}
+
+/// The keys written to a pane so far. A key has no Enter after it, so nothing is waited on.
+fn typed_keys(rx: &mut tokio::sync::mpsc::Receiver<Bytes>) -> String {
+    let mut bytes = Vec::new();
+    while let Ok(chunk) = rx.try_recv() {
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
 }

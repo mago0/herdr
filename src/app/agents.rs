@@ -375,8 +375,7 @@ impl App {
             return None;
         }
         let pane = self.pane_info(ws_idx, pane_id)?;
-        let (supervisor_pane_id, pending_deliveries, stalled_secs, blocker) =
-            self.orchestration_agent_fields(&pane_state.attached_terminal_id);
+        let orchestration = self.orchestration_agent_fields(&pane_state.attached_terminal_id);
         Some(crate::api::schema::AgentInfo {
             terminal_id: pane.terminal_id,
             name: terminal.agent_name.clone(),
@@ -400,10 +399,12 @@ impl App {
             completion_seq: terminal.last_agent_completion_seq,
             cwd: pane.cwd,
             foreground_cwd: pane.foreground_cwd,
-            supervisor_pane_id,
-            pending_deliveries,
-            stalled_secs,
-            blocker,
+            supervisor_pane_id: orchestration.supervisor_pane_id,
+            pending_deliveries: orchestration.pending_deliveries,
+            stalled_secs: orchestration.stalled_secs,
+            blocker: orchestration.blocker,
+            blocker_lines: orchestration.blocker_lines,
+            dialog: orchestration.dialog,
             revision: pane.revision,
         })
     }

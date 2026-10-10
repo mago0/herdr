@@ -12,6 +12,10 @@ pub(crate) const MIN_EVERY_MS: u64 = 1_000;
 pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 pub(crate) const MAX_TIMEOUT_MS: u64 = 3_600_000;
 pub(crate) const MAX_JOBS: usize = 64;
+/// The least time between two starts of one job, so that a job an event starts cannot spin.
+pub(crate) const MIN_RUN_GAP: Duration = Duration::from_secs(1);
+/// A job that delivers to a pane must not run on the event its own delivery makes.
+const NOT_A_JOB_EVENT: &str = "pane.delivery_changed";
 const MAX_NEWS_BYTES: usize = 4 * 1024;
 const MAX_NAME_CHARS: usize = 64;
 
@@ -31,12 +35,27 @@ pub(crate) struct JobSpec {
     pub(crate) dedupe: bool,
 }
 
+impl JobSpec {
+    /// A spec from a saved file, with its times brought inside the limits a request must meet.
+    pub(crate) fn within_limits(mut self) -> Self {
+        let min = Duration::from_millis(MIN_EVERY_MS);
+        self.every = self.every.map(|every| every.max(min));
+        self.timeout = self
+            .timeout
+            .clamp(min, Duration::from_millis(MAX_TIMEOUT_MS));
+        self
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Job {
     pub(crate) spec: JobSpec,
     next_run: Option<Instant>,
+    last_start: Option<Instant>,
     pub(crate) running: Option<u64>,
-    rerun: Option<Option<TriggerEvent>>,
+    cancel: Option<Cancel>,
+    /// A trigger that came during a run or inside the gap after a start. It starts one more run.
+    held: Option<Option<TriggerEvent>>,
     pub(crate) runs: u64,
     pub(crate) last_exit: Option<i32>,
     pub(crate) last_run_ms: Option<u64>,
@@ -57,7 +76,31 @@ pub(crate) struct JobRun {
     pub(crate) run_id: u64,
     pub(crate) spec: JobSpec,
     pub(crate) event: Option<TriggerEvent>,
+    /// Set when the job is removed or replaced, so that the run stops its command.
+    pub(crate) cancel: Cancel,
 }
+
+/// A flag one side sets and the other reads. Two flags are equal when they are the same flag.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Cancel(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl Cancel {
+    pub(crate) fn set(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn is_set(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl PartialEq for Cancel {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for Cancel {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct JobOutcome {
@@ -65,8 +108,6 @@ pub(crate) struct JobOutcome {
     pub(crate) news: bool,
     /// Text to deliver, and where. Absent when there is no news, no target, or the same news again.
     pub(crate) deliver: Option<(TerminalId, String)>,
-    /// A trigger fired during the run, so the job runs one more time.
-    pub(crate) rerun: Option<Option<TriggerEvent>>,
 }
 
 #[derive(Debug, Default)]
@@ -114,11 +155,9 @@ pub(crate) fn validate(
             format!("every_ms must be at least {MIN_EVERY_MS}"),
         ));
     }
-    if let Some(unknown) = params
-        .on_events
-        .iter()
-        .find(|event| !hookable_events.contains(&event.as_str()))
-    {
+    if let Some(unknown) = params.on_events.iter().find(|event| {
+        !hookable_events.contains(&event.as_str()) || event.as_str() == NOT_A_JOB_EVENT
+    }) {
         return Err((
             "invalid_job_trigger",
             format!("{unknown} is not an event a job can run on"),
@@ -169,13 +208,16 @@ impl JobTable {
     /// Adds a job, in place of one with the same name. An interval job is due at once.
     pub(crate) fn add(&mut self, spec: JobSpec, last_news: Option<String>, now: Instant) {
         let next_run = spec.every.map(|_| now);
+        self.stop_run(&spec.name);
         self.jobs.insert(
             spec.name.clone(),
             Job {
                 spec,
                 next_run,
+                last_start: None,
                 running: None,
-                rerun: None,
+                cancel: None,
+                held: None,
                 runs: 0,
                 last_exit: None,
                 last_run_ms: None,
@@ -186,23 +228,57 @@ impl JobTable {
     }
 
     pub(crate) fn remove(&mut self, name: &str) -> Option<Job> {
+        self.stop_run(name);
         self.jobs.remove(name)
     }
 
-    /// Starts a run, or notes one more run when the job runs now.
-    pub(crate) fn begin(&mut self, name: &str, event: Option<TriggerEvent>) -> Option<JobRun> {
+    /// Tells the run of a job, when it has one, to stop its command.
+    fn stop_run(&mut self, name: &str) {
+        if let Some(cancel) = self.jobs.get_mut(name).and_then(|job| job.cancel.take()) {
+            cancel.set();
+        }
+    }
+
+    /// Starts a run. A trigger that comes during a run, or inside the gap after the last start,
+    /// is held and starts one more run later through [`Self::take_held`].
+    pub(crate) fn begin(
+        &mut self,
+        name: &str,
+        event: Option<TriggerEvent>,
+        now: Instant,
+    ) -> Option<JobRun> {
         let job = self.jobs.get_mut(name)?;
-        if job.running.is_some() {
-            job.rerun = Some(event);
+        let in_gap = job.last_start.is_some_and(|last| now < last + MIN_RUN_GAP);
+        if job.running.is_some() || in_gap {
+            job.held = Some(event);
             return None;
         }
         self.next_run_id += 1;
         job.running = Some(self.next_run_id);
+        job.last_start = Some(now);
+        let cancel = Cancel::default();
+        job.cancel = Some(cancel.clone());
         Some(JobRun {
             run_id: self.next_run_id,
             spec: job.spec.clone(),
             event,
+            cancel,
         })
+    }
+
+    /// Held triggers of jobs that can start now, each with the event that was held.
+    pub(crate) fn take_held(&mut self, now: Instant) -> Vec<(String, Option<TriggerEvent>)> {
+        let mut ready = Vec::new();
+        for job in self.jobs.values_mut() {
+            let in_gap = job.last_start.is_some_and(|last| now < last + MIN_RUN_GAP);
+            if job.running.is_some() || in_gap {
+                continue;
+            }
+            if let Some(event) = job.held.take() {
+                ready.push((job.spec.name.clone(), event));
+            }
+        }
+        ready
     }
 
     /// Names of interval jobs whose time has come. Each gets its next time set.
@@ -277,6 +353,7 @@ impl JobTable {
             return None;
         }
         job.running = None;
+        job.cancel = None;
         job.runs += 1;
         job.last_exit = exit;
         job.last_run_ms = Some(now_ms);
@@ -292,7 +369,6 @@ impl JobTable {
         Some(JobOutcome {
             news: news.is_some(),
             deliver,
-            rerun: job.rerun.take(),
         })
     }
 }
@@ -336,6 +412,15 @@ mod tests {
     }
 
     const EVENTS: &[&str] = &["pane.closed", "pane.agent_status_changed"];
+
+    /// A time far enough after the last one that the gap between runs has passed.
+    fn later() -> Instant {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static STEP: AtomicU64 = AtomicU64::new(1);
+        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        *START.get_or_init(Instant::now)
+            + MIN_RUN_GAP * (STEP.fetch_add(1, Ordering::Relaxed) as u32) * 2
+    }
 
     fn code(result: Result<(), (&'static str, String)>) -> &'static str {
         result.err().map(|(code, _)| code).unwrap_or("ok")
@@ -447,28 +532,28 @@ mod tests {
         let target = job.target.clone().unwrap();
         table.add(job, None, Instant::now());
 
-        let run = table.begin("a", None).unwrap();
+        let run = table.begin("a", None, later()).unwrap();
         let first = table.finish("a", run.run_id, Some(0), "red\n", 1).unwrap();
         assert!(first.news);
         assert_eq!(first.deliver, Some((target.clone(), "red".into())));
 
-        let run = table.begin("a", None).unwrap();
+        let run = table.begin("a", None, later()).unwrap();
         let again = table.finish("a", run.run_id, Some(0), "red\n", 2).unwrap();
         assert!(again.news);
         assert_eq!(again.deliver, None);
 
-        let run = table.begin("a", None).unwrap();
+        let run = table.begin("a", None, later()).unwrap();
         let quiet = table.finish("a", run.run_id, Some(1), "", 3).unwrap();
         assert!(!quiet.news);
 
-        let run = table.begin("a", None).unwrap();
+        let run = table.begin("a", None, later()).unwrap();
         let back = table.finish("a", run.run_id, Some(0), "red\n", 4).unwrap();
         assert_eq!(
             back.deliver, None,
             "no news in between does not reset the last news"
         );
 
-        let run = table.begin("a", None).unwrap();
+        let run = table.begin("a", None, later()).unwrap();
         let changed = table.finish("a", run.run_id, Some(0), "green", 5).unwrap();
         assert_eq!(changed.deliver, Some((target, "green".into())));
         assert_eq!(table.get("a").unwrap().runs, 5);
@@ -486,7 +571,7 @@ mod tests {
             Instant::now(),
         );
         for _ in 0..2 {
-            let run = table.begin("a", None).unwrap();
+            let run = table.begin("a", None, later()).unwrap();
             assert!(table
                 .finish("a", run.run_id, Some(0), "red", 1)
                 .unwrap()
@@ -499,7 +584,7 @@ mod tests {
     fn news_kept_from_before_a_restart_is_not_sent_again() {
         let mut table = JobTable::default();
         table.add(spec("a"), Some("red".into()), Instant::now());
-        let run = table.begin("a", None).unwrap();
+        let run = table.begin("a", None, later()).unwrap();
         assert_eq!(
             table
                 .finish("a", run.run_id, Some(0), "red", 1)
@@ -520,7 +605,7 @@ mod tests {
             None,
             Instant::now(),
         );
-        let run = table.begin("a", None).unwrap();
+        let run = table.begin("a", None, later()).unwrap();
         let outcome = table.finish("a", run.run_id, Some(0), "red", 1).unwrap();
         assert!(outcome.news);
         assert_eq!(outcome.deliver, None);
@@ -530,23 +615,104 @@ mod tests {
     fn a_trigger_during_a_run_makes_one_more_run_with_the_last_event() {
         let mut table = JobTable::default();
         table.add(spec("a"), None, Instant::now());
-        let run = table.begin("a", None).unwrap();
+        let run = table.begin("a", None, later()).unwrap();
         let event = |name: &str| TriggerEvent {
             name: name.into(),
             json: "{}".into(),
         };
-        assert_eq!(table.begin("a", Some(event("pane.closed"))), None);
-        assert_eq!(table.begin("a", Some(event("pane.exited"))), None);
+        assert_eq!(table.begin("a", Some(event("pane.closed")), later()), None);
+        assert_eq!(table.begin("a", Some(event("pane.exited")), later()), None);
 
-        let outcome = table.finish("a", run.run_id, Some(1), "", 1).unwrap();
-        assert_eq!(outcome.rerun, Some(Some(event("pane.exited"))));
-        let next = table.begin("a", None).unwrap();
-        assert_eq!(
-            table
-                .finish("a", next.run_id, Some(1), "", 2)
-                .unwrap()
-                .rerun,
-            None
+        table.finish("a", run.run_id, Some(1), "", 1).unwrap();
+        let held = table.take_held(later());
+        assert_eq!(held, vec![("a".to_string(), Some(event("pane.exited")))]);
+        assert!(table.take_held(later()).is_empty());
+    }
+
+    #[test]
+    fn a_job_starts_at_most_once_in_the_gap_and_the_held_trigger_runs_after_it() {
+        let start = Instant::now();
+        let mut table = JobTable::default();
+        table.add(
+            JobSpec {
+                every: None,
+                on_events: vec!["pane.closed".into()],
+                ..spec("a")
+            },
+            None,
+            start,
+        );
+        let first = table.begin("a", None, start).unwrap();
+        table.finish("a", first.run_id, Some(1), "", 1);
+
+        // The run is over, but the gap is not: the trigger is held, not lost and not run now.
+        let soon = start + MIN_RUN_GAP / 2;
+        assert_eq!(table.begin("a", None, soon), None);
+        assert!(table.take_held(soon).is_empty());
+
+        let after = start + MIN_RUN_GAP;
+        assert_eq!(table.take_held(after), vec![("a".to_string(), None)]);
+        assert!(table.take_held(after).is_empty());
+        assert!(table.begin("a", None, after).is_some());
+    }
+
+    #[test]
+    fn a_job_cannot_run_on_the_event_that_its_own_delivery_makes() {
+        let real = crate::api::schema::plugin_hook_event_names();
+        assert!(real.contains(&"pane.delivery_changed"));
+        assert!(!real.contains(&"job.finished"));
+        for event in ["pane.delivery_changed", "job.finished"] {
+            let bad = JobAddParams {
+                every_ms: None,
+                on_events: vec![event.into()],
+                ..params()
+            };
+            assert_eq!(
+                code(validate(&bad, &real)),
+                "invalid_job_trigger",
+                "{event}"
+            );
+        }
+        let fine = JobAddParams {
+            every_ms: None,
+            on_events: vec!["pane.agent_stalled".into()],
+            ..params()
+        };
+        assert_eq!(code(validate(&fine, &real)), "ok");
+    }
+
+    #[test]
+    fn a_saved_job_with_values_outside_the_limits_is_brought_inside_them() {
+        let wild = JobSpec {
+            every: Some(Duration::from_millis(0)),
+            timeout: Duration::from_secs(u64::MAX / 2),
+            ..spec("a")
+        };
+        let tamed = wild.within_limits();
+        assert_eq!(tamed.every, Some(Duration::from_millis(MIN_EVERY_MS)));
+        assert_eq!(tamed.timeout, Duration::from_millis(MAX_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn removing_or_replacing_a_job_tells_its_run_to_stop() {
+        let mut table = JobTable::default();
+        table.add(spec("a"), None, Instant::now());
+        let replaced = table.begin("a", None, later()).unwrap();
+        assert!(!replaced.cancel.is_set());
+        table.add(spec("a"), None, Instant::now());
+        assert!(replaced.cancel.is_set());
+
+        let removed = table.begin("a", None, later()).unwrap();
+        table.remove("a");
+        assert!(removed.cancel.is_set());
+
+        table.add(spec("b"), None, Instant::now());
+        let finished = table.begin("b", None, later()).unwrap();
+        table.finish("b", finished.run_id, Some(0), "", 1);
+        table.remove("b");
+        assert!(
+            !finished.cancel.is_set(),
+            "a run that ended is not told to stop"
         );
     }
 
@@ -554,7 +720,7 @@ mod tests {
     fn a_result_from_a_run_that_was_replaced_is_ignored() {
         let mut table = JobTable::default();
         table.add(spec("a"), None, Instant::now());
-        let old = table.begin("a", None).unwrap();
+        let old = table.begin("a", None, later()).unwrap();
         table.add(spec("a"), None, Instant::now());
         assert_eq!(table.finish("a", old.run_id, Some(0), "red", 1), None);
         assert_eq!(table.finish("gone", 1, Some(0), "red", 1), None);

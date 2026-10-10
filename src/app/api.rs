@@ -806,6 +806,19 @@ impl App {
         panes
     }
 
+    /// Public ids of every pane that goes away when a workspace closes: its own panes, and those
+    /// of the other workspaces of its worktree group when it is the main checkout of one.
+    pub(crate) fn public_pane_ids_closed_with_workspace(
+        &self,
+        ws_idx: usize,
+    ) -> Vec<(String, String)> {
+        self.state
+            .workspace_close_indices(ws_idx)
+            .into_iter()
+            .flat_map(|index| self.public_pane_ids_in(index, None))
+            .collect()
+    }
+
     /// Reports panes that went away with their tab or workspace.
     pub(crate) fn emit_panes_closed(&mut self, panes: Vec<(String, String)>) {
         for (pane_id, workspace_id) in panes {
@@ -1224,6 +1237,7 @@ impl App {
             Method::JobList(_) => return self.handle_job_list(request.id),
             Method::JobRemove(params) => return self.handle_job_remove(request.id, params),
             Method::JobRun(params) => return self.handle_job_run(request.id, params),
+            Method::AgentAnswer(params) => return self.handle_agent_answer(request.id, params),
             Method::AgentDeliver(params) => return self.handle_agent_deliver(request.id, params),
             Method::AgentDeliveries(params) => {
                 return self.handle_agent_deliveries(request.id, params);

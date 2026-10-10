@@ -4,17 +4,19 @@ impl ClientContextMenuOverlay {
     pub(super) fn items(&self) -> Vec<ClientContextMenuItem> {
         use ClientContextMenuAction as Action;
 
-        let mut items = Vec::new();
-        if self.label_pane.is_some() {
-            // The answers come first: they are why a person opens the menu of a blocked row.
-            for (index, (key, text)) in self.answers.iter().enumerate() {
-                items.push(ClientContextMenuItem {
-                    label: format!("Answer: {key}. {text}").into(),
-                    action: Action::Answer(index),
-                });
-            }
+        // The answers are never first: Enter in a menu that just opened picks the first item.
+        let mut items = self.target_items();
+        for (index, (key, text)) in self
+            .answers
+            .iter()
+            .flat_map(|answers| answers.choices.iter())
+            .enumerate()
+        {
+            items.push(ClientContextMenuItem {
+                label: format!("Answer: {key}. {text}").into(),
+                action: Action::Answer(index),
+            });
         }
-        items.extend(self.target_items());
         if self.label_pane.is_some() {
             items.push(ClientContextMenuItem {
                 label: "Label...".into(),
@@ -147,7 +149,7 @@ impl ClientShellState {
             y,
             highlighted: 0,
             label_pane: None,
-            answers: Vec::new(),
+            answers: None,
         }));
     }
 
@@ -168,7 +170,7 @@ impl ClientShellState {
             y,
             highlighted: 0,
             label_pane: None,
-            answers: Vec::new(),
+            answers: None,
         }));
     }
 
@@ -195,7 +197,7 @@ impl ClientShellState {
             y,
             highlighted: 0,
             label_pane: None,
-            answers: Vec::new(),
+            answers: None,
         }));
     }
 
@@ -224,14 +226,17 @@ impl ClientShellState {
             return;
         };
         if let ClientContextMenuAction::Answer(index) = action {
-            if let (Some((pane_id, _)), Some((key, _))) =
-                (menu.label_pane, menu.answers.get(index).cloned())
-            {
+            let choice = menu.answers.and_then(|answers| {
+                let (key, _) = answers.choices.get(index)?.clone();
+                Some((answers.dialog, key))
+            });
+            if let (Some((pane_id, _)), Some((dialog, key))) = (menu.label_pane, choice) {
                 self.push_endpoint_method(
-                    crate::api::schema::Method::AgentSendKeys(
-                        crate::api::schema::AgentSendKeysParams {
+                    crate::api::schema::Method::AgentAnswer(
+                        crate::api::schema::AgentAnswerParams {
                             target: pane_id,
-                            keys: vec![key],
+                            key,
+                            dialog,
                         },
                     ),
                     outcome,
