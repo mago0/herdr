@@ -634,7 +634,8 @@ struct RemoteManifestReleaseRef<'a> {
 }
 
 fn current_version() -> String {
-    crate::build_info::version()
+    // A remote machine gets a published release, and the fork publishes none.
+    crate::build_info::release_version()
 }
 
 fn current_channel() -> &'static str {
