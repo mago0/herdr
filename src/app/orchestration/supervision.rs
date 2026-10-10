@@ -51,10 +51,13 @@ pub(crate) fn report_line(kind: &str, name: &str, pane_id: &str, detail: Option<
 
 /// Text with its white space collapsed and no control character or field separator.
 fn clean(text: &str) -> String {
-    text.split_whitespace()
+    let spaced = text
+        .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-        .replace(|c: char| c.is_control() || c == '|', " ")
+        .replace(|c: char| c.is_control() || c == '|', " ");
+    // No control character is left, so this drops only the characters that hide or reorder text.
+    super::deliveries::sanitize(&spaced)
 }
 
 /// Screen text as one line that cannot be read as a second field or a second prompt.
@@ -81,15 +84,21 @@ pub(crate) struct Blocker {
     pub(crate) lines: Vec<String>,
     /// The screen content counter the lines were read at. None for text an agent hook gave.
     pub(crate) seq: Option<u64>,
+    /// Which wait of the agent this is, by the server's count of waits.
+    pub(crate) block: u64,
+    /// A hash of every line of the screen that has text.
+    screen: u64,
 }
 
 impl Blocker {
-    pub(crate) fn from_screen(screen: &str, seq: u64) -> Self {
+    pub(crate) fn from_screen(screen: &str, seq: u64, block: u64) -> Self {
         let lines = blocker_lines(screen);
         Self {
             text: blocker_text(&lines),
             lines,
             seq: Some(seq),
+            block,
+            screen: screen_hash(screen),
         }
     }
 
@@ -99,12 +108,17 @@ impl Blocker {
             lines: Vec::new(),
             text: (!text.is_empty()).then_some(text),
             seq: None,
+            block: 0,
+            screen: 0,
         }
     }
 
-    /// Names the dialog on screen. None when the lines did not come from the screen.
+    /// Names the dialog on screen. None when the lines did not come from the screen. The name
+    /// changes when any text on the screen changes and when the agent waits again, so a dialog
+    /// that looks like an earlier one has another name.
     pub(crate) fn dialog(&self) -> Option<String> {
-        (self.seq.is_some() && !self.lines.is_empty()).then(|| dialog_id(&self.lines))
+        (self.seq.is_some() && !self.lines.is_empty())
+            .then(|| format!("{:016x}", fnv1a(self.screen, &self.block.to_le_bytes())))
     }
 }
 
@@ -144,16 +158,26 @@ pub(crate) fn blocker_from_screen(screen: &str) -> Option<String> {
     blocker_text(&blocker_lines(screen))
 }
 
-/// A short name for the lines of a dialog. Two screens with the same lines have the same name,
-/// so a caller can say which dialog an answer is for.
-pub(crate) fn dialog_id(lines: &[String]) -> String {
-    // FNV-1a, 64 bit.
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in lines.join("\n").bytes() {
-        hash ^= u64::from(byte);
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// FNV-1a, 64 bit, continued from `hash`.
+fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    format!("{hash:016x}")
+    hash
+}
+
+/// A hash of every line of a screen that has text. White space and empty lines do not count.
+fn screen_hash(screen: &str) -> u64 {
+    screen
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .fold(FNV_OFFSET, |hash, line| {
+            fnv1a(fnv1a(hash, clean(line).as_bytes()), b"\n")
+        })
 }
 
 #[cfg(test)]
@@ -245,23 +269,44 @@ mod tests {
             blocker_text(&lines).as_deref(),
             Some("old / Pick a / b? / \u{276f} 1. Tea / 2. Coffee")
         );
-        let id = dialog_id(&lines);
+        assert!(blocker_lines("  \n───\n").is_empty());
+    }
+
+    #[test]
+    fn a_dialog_name_follows_the_whole_screen_and_the_count_of_waits() {
+        let name = |screen: &str, block| Blocker::from_screen(screen, 1, block).dialog().unwrap();
+        let screen = "old\n\nPick a / b?\n  \u{276f} 1. Tea\n    2. Coffee\n";
+        let id = name(screen, 1);
         assert_eq!(id.len(), 16);
-        assert_eq!(id, dialog_id(&blocker_lines(screen)));
-        assert_ne!(
-            id,
-            dialog_id(&blocker_lines(
-                "old\nPick a / b?\n\u{276f} 1. Tea\n2. Milk\n"
-            ))
+        // White space and the content counter are not part of the name.
+        assert_eq!(
+            Some(id.clone()),
+            Blocker::from_screen("old\nPick a / b?\n\u{276f} 1. Tea\n2. Coffee", 9, 1).dialog()
         );
+        assert_ne!(id, name("old\nPick a / b?\n\u{276f} 1. Tea\n2. Milk\n", 1));
         // The cursor mark is part of the dialog: a moved cursor is another screen.
         assert_ne!(
             id,
-            dialog_id(&blocker_lines(
-                "old\nPick a / b?\n1. Tea\n\u{276f} 2. Coffee\n"
-            ))
+            name("old\nPick a / b?\n1. Tea\n\u{276f} 2. Coffee\n", 1)
         );
-        assert!(blocker_lines("  \n───\n").is_empty());
+        // The same screen at a later wait is another dialog.
+        assert_ne!(id, name(screen, 2));
+        // A change above the lines that are kept for a person still changes the name.
+        let long = |first: &str| format!("{first}\n{}1. Yes\n2. No\n", "same line\n".repeat(40));
+        assert_eq!(
+            Blocker::from_screen(&long("rm -rf a"), 1, 1).lines,
+            Blocker::from_screen(&long("rm -rf b"), 1, 1).lines
+        );
+        assert_ne!(name(&long("rm -rf a"), 1), name(&long("rm -rf b"), 1));
+        assert_eq!(Blocker::from_message("needs you").dialog(), None);
+    }
+
+    #[test]
+    fn blocker_lines_keep_no_character_that_hides_text() {
+        assert_eq!(
+            blocker_lines("Run\u{202e} this\u{e0041}?\n1. Yes\u{2028}\n"),
+            vec!["Run this?", "1. Yes"]
+        );
     }
 
     #[test]

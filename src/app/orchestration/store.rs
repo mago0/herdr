@@ -113,13 +113,15 @@ impl StoredState {
 /// A missing file loads as empty. A file this build cannot read, or one from a newer build, is
 /// renamed aside before it loads as empty, so that the next save does not replace it.
 pub(super) fn load(path: &Path) -> StoredState {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return StoredState::default();
-    };
-    let reason = match serde_json::from_str::<StoredState>(&text) {
-        Ok(state) if state.version <= STORE_VERSION => return state,
-        Ok(state) => format!("it is version {} from a newer build", state.version),
+    let reason = match std::fs::read_to_string(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return StoredState::default(),
+        // A file that is there and cannot be read as text is kept aside too.
         Err(err) => err.to_string(),
+        Ok(text) => match serde_json::from_str::<StoredState>(&text) {
+            Ok(state) if state.version <= STORE_VERSION => return state,
+            Ok(state) => format!("it is version {} from a newer build", state.version),
+            Err(err) => err.to_string(),
+        },
     };
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -256,8 +258,13 @@ mod tests {
     #[test]
     fn a_file_this_build_cannot_read_is_set_aside_and_not_lost() {
         for (name, content) in [
-            ("broken", "{ not json"),
-            ("newer", r#"{"version": 99, "links": [], "future": true}"#),
+            ("broken", &b"{ not json"[..]),
+            (
+                "newer",
+                &br#"{"version": 99, "links": [], "future": true}"#[..],
+            ),
+            // A write that was cut can leave bytes that are not text.
+            ("not-text", &b"{\"links\": [\xff\xfe"[..]),
         ] {
             let dir = TestDir::new(name);
             let path = dir.path().join(STORE_FILE);
@@ -275,7 +282,7 @@ mod tests {
                 .map(|entry| entry.path())
                 .find(|kept| kept != &path)
                 .unwrap_or_else(|| panic!("{name}: nothing was set aside"));
-            assert_eq!(std::fs::read_to_string(kept).unwrap(), content, "{name}");
+            assert_eq!(std::fs::read(kept).unwrap(), content, "{name}");
         }
     }
 

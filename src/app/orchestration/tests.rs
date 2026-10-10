@@ -271,18 +271,22 @@ async fn a_delivery_waits_while_the_agent_works_and_is_typed_when_it_waits_for_i
 async fn a_delivery_waits_while_the_pane_holds_text_that_was_typed_and_not_sent() {
     let mut f = fixture();
     let terminal = f.terminal(1, f.worker);
-    f.app.orchestration.note_pane_draft(&terminal, Some(true));
+    f.app
+        .note_pane_keys(&terminal, &[deliveries::DraftKey::Text(2)]);
     assert_eq!(f.deliver("worker", "wake").state, DeliveryState::Queued);
     f.tick();
     assert_eq!(typed(&mut f.worker_rx).await, "");
 
-    // Keys that say nothing sure about the text change nothing.
-    f.app.orchestration.note_pane_draft(&terminal, None);
+    // One of two characters erased leaves text.
+    f.app
+        .note_pane_keys(&terminal, &[deliveries::DraftKey::Erase]);
     f.tick();
     assert_eq!(typed(&mut f.worker_rx).await, "");
 
-    f.app.orchestration.note_pane_draft(&terminal, Some(false));
-    f.tick();
+    // The release needs no tick from the timer: the key that clears the text asks for one.
+    f.app
+        .note_pane_keys(&terminal, &[deliveries::DraftKey::Clear]);
+    f.app.run_orchestration_tick(Instant::now());
     assert_eq!(typed(&mut f.worker_rx).await, "wake\r");
 }
 
@@ -1165,4 +1169,375 @@ fn typed_keys(rx: &mut tokio::sync::mpsc::Receiver<Bytes>) -> String {
         bytes.extend_from_slice(&chunk);
     }
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+impl Fixture {
+    fn keys(&mut self, ws_idx: usize, pane: PaneId, keys: &[deliveries::DraftKey]) {
+        let terminal = self.terminal(ws_idx, pane);
+        self.app.note_pane_keys(&terminal, keys);
+    }
+
+    fn pending(&self, ws_idx: usize, pane: PaneId) -> u32 {
+        self.app
+            .orchestration
+            .pending_for(&self.terminal(ws_idx, pane))
+    }
+}
+
+#[tokio::test]
+async fn a_delivery_is_typed_when_the_text_a_person_typed_is_erased() {
+    use deliveries::DraftKey;
+    let mut f = fixture();
+    f.keys(1, f.worker, &[DraftKey::Text(1)]);
+    let held = f.deliver("worker", "wake");
+    assert_eq!(held.state, DeliveryState::Queued);
+    assert_eq!(held.held_by.as_deref(), Some("unsent_input"));
+
+    f.keys(1, f.worker, &[DraftKey::Erase]);
+    f.app.run_orchestration_tick(Instant::now());
+    assert_eq!(typed(&mut f.worker_rx).await, "wake\r");
+}
+
+#[tokio::test]
+async fn text_typed_at_a_dialog_is_an_answer_and_does_not_hold_deliveries() {
+    use deliveries::DraftKey;
+    let mut f = fixture();
+    f.worker_state(AgentState::Blocked);
+    f.keys(1, f.worker, &[DraftKey::Text(1)]);
+    f.worker_state(AgentState::Idle);
+    assert_eq!(f.deliver("worker", "wake").state, DeliveryState::Delivered);
+}
+
+#[tokio::test]
+async fn an_agent_that_starts_to_work_took_the_text_and_text_typed_while_it_works_stays() {
+    use deliveries::DraftKey;
+    let mut f = fixture();
+    f.keys(1, f.worker, &[DraftKey::Text(4)]);
+    f.worker_state(AgentState::Working);
+    f.worker_state(AgentState::Idle);
+    assert_eq!(f.deliver("worker", "first").state, DeliveryState::Delivered);
+    assert_eq!(typed(&mut f.worker_rx).await, "first\r");
+
+    // A follow-up typed while the agent works is still in the input when the work ends.
+    f.worker_state(AgentState::Working);
+    f.keys(1, f.worker, &[DraftKey::Text(4)]);
+    let terminal = f.terminal(1, f.worker);
+    f.app
+        .note_agent_state_change(1, f.worker, AgentState::Working, AgentState::Working);
+    f.worker_state(AgentState::Idle);
+    assert_eq!(f.deliver("worker", "second").state, DeliveryState::Queued);
+    assert!(f.app.orchestration.drafts.holds(&terminal, Instant::now()));
+}
+
+#[tokio::test]
+async fn a_delivery_waits_while_a_client_is_attached_to_the_terminal_alone() {
+    let mut f = fixture();
+    let terminal = f.terminal(1, f.worker);
+    f.app.orchestration.attached_terminals.insert(terminal);
+    let held = f.deliver("worker", "wake");
+    assert_eq!(held.held_by.as_deref(), Some("focused"));
+    f.app.orchestration.attached_terminals.clear();
+    f.tick();
+    assert_eq!(typed(&mut f.worker_rx).await, "wake\r");
+}
+
+#[tokio::test]
+async fn a_repeat_of_the_blocked_state_is_not_a_second_report() {
+    let mut f = fixture();
+    f.app.state.active = Some(1);
+    f.supervise(vec![SuperviseReport::Blocked]);
+    f.worker_state(AgentState::Blocked);
+    assert!(typed(&mut f.supervisor_rx)
+        .await
+        .starts_with("HERDR|blocked|"));
+    f.app
+        .note_agent_state_change(1, f.worker, AgentState::Blocked, AgentState::Blocked);
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "");
+}
+
+#[tokio::test]
+async fn a_newer_report_takes_the_place_of_one_that_still_waits() {
+    let mut f = fixture();
+    f.app.state.active = Some(1);
+    f.supervise(vec![SuperviseReport::Blocked, SuperviseReport::Exited]);
+    // The supervisor works, so its reports wait.
+    f.set_agent(0, f.supervisor, "lead", AgentState::Working);
+    for _ in 0..3 {
+        f.worker_state(AgentState::Blocked);
+        f.worker_state(AgentState::Working);
+    }
+    assert_eq!(f.pending(0, f.supervisor), 1);
+    // Mail from another sender stays.
+    f.deliver("lead", "HERDR|blocked|worker|w2:p1|not from the server");
+    assert_eq!(f.pending(0, f.supervisor), 2);
+
+    let worker_pane = f.app.public_pane_id(1, f.worker).unwrap();
+    f.app.state.workspaces.remove(1);
+    f.tick();
+    assert_eq!(f.pending(0, f.supervisor), 2);
+    f.set_agent(0, f.supervisor, "lead", AgentState::Idle);
+    f.tick();
+    assert_eq!(
+        typed(&mut f.supervisor_rx).await,
+        "HERDR|blocked|worker|w2:p1|not from the server\r"
+    );
+    f.tick();
+    assert_eq!(
+        typed(&mut f.supervisor_rx).await,
+        format!("HERDR|exited|worker|{worker_pane}\r")
+    );
+}
+
+#[tokio::test]
+async fn the_same_screen_at_a_later_wait_is_another_dialog() {
+    let mut f = fixture();
+    f.show_on_worker(DIALOG_A);
+    f.worker_state(AgentState::Blocked);
+    let first = f.agent(1, f.worker).dialog.unwrap();
+
+    // The dialog was answered in the pane, and the agent asks the same thing again.
+    f.worker_state(AgentState::Working);
+    f.worker_state(AgentState::Blocked);
+    let second = f.agent(1, f.worker).dialog.unwrap();
+    assert_ne!(first, second);
+    assert_eq!(error_code(&f.answer("1", &first)), "dialog_changed");
+    assert_eq!(typed_keys(&mut f.worker_rx), "");
+    assert!(serde_json::from_str::<SuccessResponse>(&f.answer("1", &second)).is_ok());
+}
+
+#[tokio::test]
+async fn a_saved_delivery_gets_the_checks_of_a_request_when_it_loads() {
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-orchestration-load-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(store::STORE_FILE);
+    let mut f = fixture();
+    let pane = f.app.public_pane_id(1, f.worker).unwrap();
+    let saved = serde_json::json!({
+        "deliveries": [
+            { "pane_id": pane, "text": "go\u{1b}[201~\rnow", "queued_at_ms": 1 },
+            { "pane_id": pane, "text": "\u{1b}\r", "queued_at_ms": 2 },
+        ],
+        "jobs": [{
+            "name": "loop",
+            "command": ["true"],
+            "on_events": ["pane.delivery_changed"],
+            "target_pane_id": pane,
+        }],
+    });
+    std::fs::write(&path, saved.to_string()).unwrap();
+    f.worker_state(AgentState::Working);
+    f.app.orchestration = Orchestration::new(Some(path), 600);
+    f.app.ensure_orchestration_loaded();
+    assert_eq!(f.pending(1, f.worker), 1);
+    assert!(f.app.orchestration.jobs.get("loop").is_none());
+    f.worker_state(AgentState::Idle);
+    f.tick();
+    assert_eq!(typed(&mut f.worker_rx).await, "go[201~now\r");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_save_inside_the_save_interval_does_not_make_the_tick_run_on_every_pass() {
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-orchestration-save-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut f = fixture();
+    f.app.orchestration = Orchestration::new(Some(dir.join(store::STORE_FILE)), 600);
+    f.worker_state(AgentState::Working);
+    f.deliver("worker", "one");
+    f.app.run_orchestration_tick(Instant::now());
+    // A second change inside the interval is not saved yet, and the tick is not due again.
+    f.deliver("worker", "two");
+    let now = Instant::now();
+    f.app.run_orchestration_tick(now);
+    assert!(f.app.orchestration.dirty);
+    assert!(!f.app.orchestration.tick_due(now));
+    assert!(f.app.orchestration.tick_due(now + SAVE_INTERVAL));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+impl Fixture {
+    /// Runs ticks, which start held triggers, until the job has ended `runs` runs.
+    async fn tick_until_runs(&mut self, name: &str, runs: u64) {
+        for _ in 0..300 {
+            self.tick();
+            self.app.drain_all_internal_events();
+            if self.job_info(name).runs >= runs {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!(
+            "job {name} did not reach {runs} runs: {:?}",
+            self.job_info(name)
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_that_comes_while_its_job_runs_starts_one_more_run() {
+    let mut f = fixture();
+    f.add_job(JobAddParams {
+        every_ms: None,
+        on_events: vec!["pane.agent_status_changed".into()],
+        target: None,
+        ..job("twice", "true")
+    });
+    f.worker_state(AgentState::Working);
+    f.worker_state(AgentState::Idle);
+    f.tick_until_runs("twice", 2).await;
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    f.tick();
+    f.app.drain_all_internal_events();
+    assert_eq!(f.job_info("twice").runs, 2);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn news_that_a_full_queue_refused_is_delivered_by_a_later_run() {
+    let mut f = fixture();
+    f.worker_state(AgentState::Working);
+    for _ in 0..deliveries::MAX_PENDING_PER_TERMINAL {
+        f.deliver("worker", "held");
+    }
+    f.add_job(JobAddParams {
+        every_ms: None,
+        on_events: vec!["pane.closed".into()],
+        ..job("ci", "echo red")
+    });
+    let run = |f: &mut Fixture| {
+        f.app
+            .handle_job_run("req".into(), JobTarget { name: "ci".into() })
+    };
+    run(&mut f);
+    f.tick_until_runs("ci", 1).await;
+    assert_eq!(f.job_info("ci").last_news, None);
+
+    let worker = f.terminal(1, f.worker);
+    f.app.orchestration.deliveries.drop_terminal(&worker);
+    run(&mut f);
+    f.tick_until_runs("ci", 2).await;
+    assert_eq!(f.job_info("ci").last_news.as_deref(), Some("red"));
+    assert_eq!(f.pending(1, f.worker), 1);
+}
+
+#[cfg(unix)]
+impl Fixture {
+    /// Starts a job whose command starts a child and waits. Gives the two process ids.
+    async fn start_job_with_child(
+        &mut self,
+        params: JobAddParams,
+        pids: &std::path::Path,
+    ) -> Vec<String> {
+        self.add_job(params);
+        self.tick();
+        let mut started = String::new();
+        for _ in 0..100 {
+            started = std::fs::read_to_string(pids).unwrap_or_default();
+            if started.split_whitespace().count() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let started: Vec<String> = started.split_whitespace().map(str::to_string).collect();
+        assert_eq!(started.len(), 2, "the command did not start");
+        assert!(started.iter().all(|pid| process_runs(pid)));
+        started
+    }
+}
+
+#[cfg(unix)]
+async fn all_gone(pids: &[String]) -> bool {
+    for _ in 0..150 {
+        if !pids.iter().any(|pid| process_runs(pid)) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    false
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_past_its_time_limit_stops_what_its_command_started_too() {
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-orchestration-limit-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pids = dir.join("pids");
+    let mut f = fixture();
+    let started = f
+        .start_job_with_child(
+            JobAddParams {
+                timeout_ms: Some(1_000),
+                ..job(
+                    "limit",
+                    &format!("sleep 60 & echo $! $$ > {}; wait", pids.display()),
+                )
+            },
+            &pids,
+        )
+        .await;
+    f.wait_for_runs("limit", 1).await;
+    assert!(
+        all_gone(&started).await,
+        "the command or its child still runs"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_end_of_the_server_stops_the_commands_of_running_jobs() {
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-orchestration-close-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let pids = dir.join("pids");
+    let mut f = fixture();
+    let started = f
+        .start_job_with_child(
+            job(
+                "long",
+                &format!("sleep 60 & echo $! $$ > {}; wait", pids.display()),
+            ),
+            &pids,
+        )
+        .await;
+    f.app.close_orchestration();
+    assert!(
+        all_gone(&started).await,
+        "the command or its child still runs"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn output_printed_before_a_process_that_left_the_group_is_still_news() {
+    if std::process::Command::new("setsid")
+        .arg("true")
+        .status()
+        .is_err()
+    {
+        return;
+    }
+    let mut f = fixture();
+    f.add_job(job("detached", "echo up; setsid sleep 5 & exit 0"));
+    f.tick();
+    f.wait_for_runs("detached", 1).await;
+    assert_eq!(typed(&mut f.worker_rx).await, "up\r");
 }

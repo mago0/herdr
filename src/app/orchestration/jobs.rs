@@ -36,14 +36,24 @@ pub(crate) struct JobSpec {
 }
 
 impl JobSpec {
-    /// A spec from a saved file, with its times brought inside the limits a request must meet.
-    pub(crate) fn within_limits(mut self) -> Self {
+    /// A spec from a saved file, held to what a request must meet: its times are brought inside
+    /// the limits, events a job cannot run on are dropped, and a spec with a bad name, no
+    /// command or no trigger left is refused.
+    pub(crate) fn checked_as_saved(mut self, hookable_events: &[&str]) -> Option<Self> {
         let min = Duration::from_millis(MIN_EVERY_MS);
         self.every = self.every.map(|every| every.max(min));
         self.timeout = self
             .timeout
             .clamp(min, Duration::from_millis(MAX_TIMEOUT_MS));
-        self
+        self.on_events
+            .retain(|event| job_event(event, hookable_events));
+        let has_command = self
+            .command
+            .first()
+            .is_some_and(|program| !program.is_empty());
+        let has_trigger =
+            self.every.is_some() || !self.on_events.is_empty() || self.on_path.is_some();
+        (valid_name(&self.name) && has_command && has_trigger).then_some(self)
     }
 }
 
@@ -80,17 +90,37 @@ pub(crate) struct JobRun {
     pub(crate) cancel: Cancel,
 }
 
-/// A flag one side sets and the other reads. Two flags are equal when they are the same flag.
+/// A flag one side sets and the other reads, with the process group of the run's command once
+/// it has started. Two flags are equal when they are the same flag.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Cancel(std::sync::Arc<std::sync::atomic::AtomicBool>);
+pub(crate) struct Cancel(std::sync::Arc<CancelState>);
+
+#[derive(Debug, Default)]
+struct CancelState {
+    stop: std::sync::atomic::AtomicBool,
+    /// 0 until the command has started.
+    group: std::sync::atomic::AtomicU32,
+}
 
 impl Cancel {
     pub(crate) fn set(&self) {
-        self.0.store(true, std::sync::atomic::Ordering::Release);
+        self.0
+            .stop
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     pub(crate) fn is_set(&self) -> bool {
-        self.0.load(std::sync::atomic::Ordering::Acquire)
+        self.0.stop.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn set_group(&self, group: u32) {
+        self.0
+            .group
+            .store(group, std::sync::atomic::Ordering::Release);
+    }
+
+    fn group(&self) -> Option<u32> {
+        Some(self.0.group.load(std::sync::atomic::Ordering::Acquire)).filter(|group| *group != 0)
     }
 }
 
@@ -114,6 +144,11 @@ pub(crate) struct JobOutcome {
 pub(crate) struct JobTable {
     jobs: BTreeMap<String, Job>,
     next_run_id: u64,
+}
+
+/// True for an event a job can run on.
+fn job_event(event: &str, hookable_events: &[&str]) -> bool {
+    hookable_events.contains(&event) && event != NOT_A_JOB_EVENT
 }
 
 pub(crate) fn valid_name(name: &str) -> bool {
@@ -155,9 +190,11 @@ pub(crate) fn validate(
             format!("every_ms must be at least {MIN_EVERY_MS}"),
         ));
     }
-    if let Some(unknown) = params.on_events.iter().find(|event| {
-        !hookable_events.contains(&event.as_str()) || event.as_str() == NOT_A_JOB_EVENT
-    }) {
+    if let Some(unknown) = params
+        .on_events
+        .iter()
+        .find(|event| !job_event(event, hookable_events))
+    {
         return Err((
             "invalid_job_trigger",
             format!("{unknown} is not an event a job can run on"),
@@ -209,12 +246,15 @@ impl JobTable {
     pub(crate) fn add(&mut self, spec: JobSpec, last_news: Option<String>, now: Instant) {
         let next_run = spec.every.map(|_| now);
         self.stop_run(&spec.name);
+        // The gap between starts holds across a replace, so a job that adds itself again from
+        // its own command cannot spin.
+        let last_start = self.jobs.get(&spec.name).and_then(|job| job.last_start);
         self.jobs.insert(
             spec.name.clone(),
             Job {
                 spec,
                 next_run,
-                last_start: None,
+                last_start,
                 running: None,
                 cancel: None,
                 held: None,
@@ -236,6 +276,25 @@ impl JobTable {
     fn stop_run(&mut self, name: &str) {
         if let Some(cancel) = self.jobs.get_mut(name).and_then(|job| job.cancel.take()) {
             cancel.set();
+        }
+    }
+
+    /// Tells every run to stop and gives the process groups of the commands that run now.
+    pub(crate) fn stop_all(&mut self) -> Vec<u32> {
+        self.jobs
+            .values_mut()
+            .filter_map(|job| job.cancel.take())
+            .filter_map(|cancel| {
+                cancel.set();
+                cancel.group()
+            })
+            .collect()
+    }
+
+    /// Records news that reached the queue of its target, for the check against a repeat.
+    pub(crate) fn note_news_delivered(&mut self, name: &str, news: String) {
+        if let Some(job) = self.jobs.get_mut(name) {
+            job.last_news = Some(news);
         }
     }
 
@@ -363,7 +422,9 @@ impl JobTable {
             (Some(text), Some(target)) if !repeated => Some((target.clone(), text.clone())),
             _ => None,
         };
-        if news.is_some() {
+        // News with a target counts as told when its delivery is queued; see
+        // [`Self::note_news_delivered`].
+        if news.is_some() && deliver.is_none() {
             job.last_news = news.clone();
         }
         Some(JobOutcome {
@@ -536,6 +597,7 @@ mod tests {
         let first = table.finish("a", run.run_id, Some(0), "red\n", 1).unwrap();
         assert!(first.news);
         assert_eq!(first.deliver, Some((target.clone(), "red".into())));
+        table.note_news_delivered("a", "red".into());
 
         let run = table.begin("a", None, later()).unwrap();
         let again = table.finish("a", run.run_id, Some(0), "red\n", 2).unwrap();
@@ -688,9 +750,79 @@ mod tests {
             timeout: Duration::from_secs(u64::MAX / 2),
             ..spec("a")
         };
-        let tamed = wild.within_limits();
+        let real = crate::api::schema::plugin_hook_event_names();
+        let tamed = wild.checked_as_saved(&real).unwrap();
         assert_eq!(tamed.every, Some(Duration::from_millis(MIN_EVERY_MS)));
         assert_eq!(tamed.timeout, Duration::from_millis(MAX_TIMEOUT_MS));
+    }
+
+    #[test]
+    fn a_saved_job_that_no_request_could_make_is_refused() {
+        let real = crate::api::schema::plugin_hook_event_names();
+        let on = |events: &[&str]| JobSpec {
+            every: None,
+            on_events: events.iter().map(|event| event.to_string()).collect(),
+            ..spec("a")
+        };
+        // The event of a job's own delivery is dropped, and a job with no trigger left goes.
+        assert_eq!(
+            on(&["pane.delivery_changed", "pane.closed", "no.such"])
+                .checked_as_saved(&real)
+                .unwrap()
+                .on_events,
+            vec!["pane.closed".to_string()]
+        );
+        assert_eq!(on(&["pane.delivery_changed"]).checked_as_saved(&real), None);
+        assert_eq!(spec("Bad Name").checked_as_saved(&real), None);
+        let no_command = JobSpec {
+            command: Vec::new(),
+            ..spec("a")
+        };
+        assert_eq!(no_command.checked_as_saved(&real), None);
+    }
+
+    #[test]
+    fn a_job_that_is_replaced_keeps_the_gap_since_its_last_start() {
+        let start = Instant::now();
+        let mut table = JobTable::default();
+        table.add(spec("a"), None, start);
+        assert!(table.begin("a", None, start).is_some());
+        table.add(spec("a"), None, start);
+        assert_eq!(table.begin("a", None, start + MIN_RUN_GAP / 2), None);
+        assert!(table.begin("a", None, start + MIN_RUN_GAP).is_some());
+    }
+
+    #[test]
+    fn news_for_a_target_counts_as_told_only_when_its_delivery_is_queued() {
+        let mut table = JobTable::default();
+        table.add(spec("a"), None, Instant::now());
+        let first = table.begin("a", None, later()).unwrap();
+        let outcome = table.finish("a", first.run_id, Some(0), "red", 1).unwrap();
+        assert!(outcome.deliver.is_some());
+        assert_eq!(table.get("a").unwrap().last_news, None);
+
+        // The delivery was refused, so the same output is news again.
+        let second = table.begin("a", None, later()).unwrap();
+        let outcome = table.finish("a", second.run_id, Some(0), "red", 2).unwrap();
+        assert!(outcome.deliver.is_some());
+        table.note_news_delivered("a", "red".into());
+
+        let third = table.begin("a", None, later()).unwrap();
+        let outcome = table.finish("a", third.run_id, Some(0), "red", 3).unwrap();
+        assert_eq!(outcome.deliver, None);
+    }
+
+    #[test]
+    fn stopping_all_runs_gives_the_process_groups_of_the_commands_that_started() {
+        let mut table = JobTable::default();
+        table.add(spec("a"), None, Instant::now());
+        table.add(spec("b"), None, Instant::now());
+        let started = table.begin("a", None, later()).unwrap();
+        let not_yet = table.begin("b", None, later()).unwrap();
+        started.cancel.set_group(4242);
+        assert_eq!(table.stop_all(), vec![4242]);
+        assert!(started.cancel.is_set() && not_yet.cancel.is_set());
+        assert!(table.stop_all().is_empty());
     }
 
     #[test]

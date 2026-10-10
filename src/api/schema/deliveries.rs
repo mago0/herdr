@@ -39,4 +39,8 @@ pub struct DeliveryInfo {
     pub source: Option<String>,
     pub state: DeliveryState,
     pub queued_at_ms: u64,
+    /// Why a queued delivery waits: `agent_not_ready`, `agent_busy`, `unsent_input` or
+    /// `focused`. Absent when it waits only for the delivery before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held_by: Option<String>,
 }

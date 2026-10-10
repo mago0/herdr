@@ -2049,10 +2049,15 @@ impl HeadlessServer {
                 else {
                     return false;
                 };
+                let keys = crate::app::orchestration::deliveries::draft_keys_from_bytes(&data);
+                let attached = self.terminal_id_by_string(terminal_id);
                 if let Some(runtime) = self.runtime_for_terminal_id_string(terminal_id) {
                     if let Err(err) = apply_terminal_attach_input(runtime, data) {
                         warn!(client_id, terminal_id = %terminal_id, err = %err);
                     }
+                }
+                if let Some(attached) = attached {
+                    self.app.note_pane_keys(&attached, &keys);
                 }
                 true
             }
@@ -2400,9 +2405,9 @@ impl HeadlessServer {
                     .state
                     .terminal_id_for_pane(workspace_index, runtime_pane_id)
                 {
-                    self.app.orchestration.note_pane_draft(
+                    self.app.note_pane_keys(
                         &terminal_id,
-                        crate::app::orchestration::deliveries::draft_change(&events),
+                        &crate::app::orchestration::deliveries::draft_keys(&events),
                     );
                 }
                 foreground_changed | geometry_changed || scrolled
@@ -3300,6 +3305,16 @@ impl HeadlessServer {
 
         if self.app.orchestration.tick_due(now) {
             self.app.orchestration.client_attached = self.has_app_client();
+            self.app.orchestration.attached_terminals = self
+                .clients
+                .values()
+                .filter_map(|client| match &client.mode {
+                    ClientConnectionMode::TerminalAttach { terminal_id } => {
+                        self.terminal_id_by_string(terminal_id)
+                    }
+                    _ => None,
+                })
+                .collect();
             self.app.run_orchestration_tick(now);
         }
         changed

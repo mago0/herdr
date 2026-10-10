@@ -72,7 +72,11 @@ pub(crate) struct Orchestration {
     last_seen: HashMap<TerminalId, LastSeen>,
     pub(crate) blockers: HashMap<TerminalId, supervision::Blocker>,
     /// Terminals whose input holds text a person typed and has not sent.
-    drafts: std::collections::HashSet<TerminalId>,
+    drafts: deliveries::DraftTracker,
+    /// Terminals that a client is attached to alone, outside the shell.
+    pub(crate) attached_terminals: std::collections::HashSet<TerminalId>,
+    /// Counts each time an agent starts to wait at a dialog, so that two dialogs have two names.
+    block_count: u64,
     pub(crate) stalls: StallTable,
     pub(crate) stall_after: Option<Duration>,
     pub(crate) jobs: JobTable,
@@ -93,7 +97,9 @@ impl Orchestration {
             links: HashMap::new(),
             last_seen: HashMap::new(),
             blockers: HashMap::new(),
-            drafts: std::collections::HashSet::new(),
+            drafts: deliveries::DraftTracker::default(),
+            attached_terminals: std::collections::HashSet::new(),
+            block_count: 0,
             stalls: StallTable::default(),
             stall_after: stall_after(stall_after_secs),
             jobs: JobTable::default(),
@@ -112,18 +118,6 @@ impl Orchestration {
 
     pub(crate) fn tick_due(&self, now: Instant) -> bool {
         self.next_tick.is_none_or(|at| now >= at)
-    }
-
-    /// Records what a person's keys say about unsent text in a pane. See
-    /// [`deliveries::draft_change`].
-    pub(crate) fn note_pane_draft(&mut self, terminal: &TerminalId, change: Option<bool>) {
-        match change {
-            Some(true) => {
-                self.drafts.insert(terminal.clone());
-            }
-            Some(false) if self.drafts.remove(terminal) => self.wake(),
-            Some(false) | None => {}
-        }
     }
 
     /// Makes the next loop pass run the tick, for a change that can make a pane safe.
@@ -213,6 +207,29 @@ impl App {
             .unwrap_or_else(|| terminal.to_string())
     }
 
+    /// Records what a person's keys do to the unsent text in a pane's input.
+    pub(crate) fn note_pane_keys(&mut self, terminal: &TerminalId, keys: &[deliveries::DraftKey]) {
+        if keys.is_empty() {
+            return;
+        }
+        // Keys typed at a dialog answer the dialog. They are not text in the input.
+        let at_dialog = self
+            .state
+            .terminals
+            .get(terminal)
+            .is_some_and(|state| state.state == AgentState::Blocked);
+        if at_dialog {
+            return;
+        }
+        if self
+            .orchestration
+            .drafts
+            .apply(terminal, keys, Instant::now())
+        {
+            self.orchestration.wake();
+        }
+    }
+
     fn pane_readiness(&self, terminal: &TerminalId) -> Option<PaneReadiness> {
         let (ws_idx, pane_id) = self.terminal_location(terminal)?;
         let state = self.state.terminals.get(terminal)?;
@@ -225,9 +242,10 @@ impl App {
             agent_ready: state.effective_known_agent().is_some()
                 && !state.managed_agent_launch_pending(),
             waiting_for_input: state.state == AgentState::Idle,
-            unsent_input: self.orchestration.drafts.contains(terminal),
+            unsent_input: self.orchestration.drafts.holds(terminal, Instant::now()),
             focused,
             client_attached: self.orchestration.client_attached,
+            attached_directly: self.orchestration.attached_terminals.contains(terminal),
         })
     }
 
@@ -241,6 +259,11 @@ impl App {
             source: delivery.source.clone(),
             state,
             queued_at_ms: delivery.queued_at_ms,
+            held_by: (state == DeliveryState::Queued)
+                .then(|| self.pane_readiness(&delivery.terminal))
+                .flatten()
+                .and_then(PaneReadiness::hold)
+                .map(str::to_string),
         }
     }
 
@@ -298,9 +321,19 @@ impl App {
     }
 
     /// Queues a line the server itself made. A refusal is logged, because nobody waits for it.
-    fn enqueue_server_delivery(&mut self, terminal: TerminalId, text: String, source: String) {
-        if let Err(refusal) = self.enqueue_delivery(terminal, text, Some(source.clone()), None) {
-            tracing::warn!(source = %source, reason = ?refusal, "delivery was not queued");
+    /// True when the line was queued.
+    fn enqueue_server_delivery(
+        &mut self,
+        terminal: TerminalId,
+        text: String,
+        source: String,
+    ) -> bool {
+        match self.enqueue_delivery(terminal, text, Some(source.clone()), None) {
+            Ok(_) => true,
+            Err(refusal) => {
+                tracing::warn!(source = %source, reason = ?refusal, "delivery was not queued");
+                false
+            }
         }
     }
 
@@ -587,6 +620,33 @@ impl App {
                     .unwrap_or_default(),
             ),
         };
+        // A report that still waits is out of date once a newer one of its kind exists, and
+        // every report about a pane is out of date once the pane is gone. Dropping those keeps
+        // a supervisor that is slow to read from losing the report that matters.
+        let replaced: &[&str] = match kind {
+            SuperviseReport::Blocked => &["blocked"],
+            SuperviseReport::Stalled => &["stalled"],
+            SuperviseReport::Exited => &["blocked", "stalled", "exited"],
+        };
+        let heads: Vec<String> = replaced
+            .iter()
+            .map(|kind| supervision::report_line(kind, &name, &pane_id, None))
+            .collect();
+        let dropped = self
+            .orchestration
+            .deliveries
+            .remove_where(&link.supervisor, |delivery| {
+                delivery.source.as_deref() == Some(SUPERVISE_SOURCE)
+                    && heads.iter().any(|head| {
+                        delivery
+                            .text
+                            .strip_prefix(head.as_str())
+                            .is_some_and(|rest| rest.is_empty() || rest.starts_with('|'))
+                    })
+            });
+        if dropped > 0 {
+            self.orchestration.dirty = true;
+        }
         let kind = match kind {
             SuperviseReport::Blocked => "blocked",
             SuperviseReport::Exited => "exited",
@@ -611,9 +671,10 @@ impl App {
             .and_then(|ws| ws.terminal_id(pane_id))
             .cloned()?;
         self.orchestration.wake();
-        // An agent that starts to work took what was in its input.
-        if current == AgentState::Working {
-            self.orchestration.drafts.remove(&terminal);
+        // An agent that starts to work took what was in its input. Text typed while it works
+        // is a new draft, so only the start of the work clears.
+        if current == AgentState::Working && previous != AgentState::Working {
+            self.orchestration.drafts.clear(&terminal);
         }
         if current != AgentState::Blocked {
             self.orchestration.blockers.remove(&terminal);
@@ -626,6 +687,7 @@ impl App {
                 .get(&terminal)
                 .and_then(|blocker| blocker.text.clone());
         }
+        self.orchestration.block_count += 1;
         let blocker = self
             .state
             .terminals
@@ -634,7 +696,7 @@ impl App {
             .and_then(|authority| authority.message.as_deref())
             .map(supervision::Blocker::from_message)
             .filter(|blocker| blocker.text.is_some())
-            .or_else(|| self.read_blocker(&terminal));
+            .or_else(|| self.read_blocker(&terminal, self.orchestration.block_count));
         let text = blocker.as_ref().and_then(|blocker| blocker.text.clone());
         match blocker {
             Some(blocker) => {
@@ -652,12 +714,16 @@ impl App {
     }
 
     /// Reads what the agent in a terminal shows now.
-    fn read_blocker(&self, terminal: &TerminalId) -> Option<supervision::Blocker> {
+    fn read_blocker(&self, terminal: &TerminalId, block: u64) -> Option<supervision::Blocker> {
         let (ws_idx, pane_id) = self.terminal_location(terminal)?;
         let runtime = self.lookup_runtime_sender(ws_idx, pane_id)?;
+        // The counter is read first: bytes that come between the two reads then leave a counter
+        // that is behind the text, and the next refresh reads the screen again.
+        let seq = runtime.content_seq();
         Some(supervision::Blocker::from_screen(
             &runtime.detection_text(),
-            runtime.content_seq(),
+            seq,
+            block,
         ))
     }
 
@@ -678,7 +744,15 @@ impl App {
             .map(|(terminal, _)| terminal.clone())
             .collect();
         for terminal in stale {
-            if let Some(blocker) = self.read_blocker(&terminal) {
+            let Some(block) = self
+                .orchestration
+                .blockers
+                .get(&terminal)
+                .map(|blocker| blocker.block)
+            else {
+                continue;
+            };
+            if let Some(blocker) = self.read_blocker(&terminal, block) {
                 self.orchestration.blockers.insert(terminal, blocker);
             }
         }
@@ -691,8 +765,9 @@ impl App {
             .terminals
             .get(terminal)
             .is_some_and(|state| state.state == AgentState::Blocked);
+        let block = self.orchestration.blockers.get(terminal)?.block;
         blocked
-            .then(|| self.read_blocker(terminal))
+            .then(|| self.read_blocker(terminal, block))
             .flatten()
             .and_then(|blocker| blocker.dialog())
     }
@@ -766,16 +841,9 @@ impl App {
             self.orchestration.in_flight.remove(&terminal);
             self.orchestration.blockers.remove(&terminal);
         }
-        let closed: Vec<TerminalId> = self
-            .orchestration
-            .drafts
-            .iter()
-            .filter(|terminal| self.terminal_location(terminal).is_none())
-            .cloned()
-            .collect();
-        for terminal in closed {
-            self.orchestration.drafts.remove(&terminal);
-        }
+        let mut drafts = std::mem::take(&mut self.orchestration.drafts);
+        drafts.retain(|terminal| self.terminal_location(terminal).is_some());
+        self.orchestration.drafts = drafts;
     }
 
     fn sample_stalls(&mut self, now: Instant) {
@@ -974,13 +1042,27 @@ impl App {
             .last_save
             .is_some_and(|at| at.elapsed() < SAVE_INTERVAL);
         if self.orchestration.dirty && recent {
-            self.orchestration.wake();
+            // The tick saves it. A tick that is already nearer than the save time stays.
+            let due = self.orchestration.last_save.map(|at| at + SAVE_INTERVAL);
+            if let (Some(due), Some(next)) = (due, self.orchestration.next_tick) {
+                self.orchestration.next_tick = Some(next.min(due));
+            }
             return;
         }
         self.save_orchestration_now();
     }
 
-    /// Saves changed state at once. For the end of the server and for a handoff.
+    /// Stops what must not outlive this server and saves the state. For the end of the server
+    /// and for a handoff: the next server starts the jobs again, and a command left running here
+    /// would have nobody to stop it at its time limit.
+    pub(crate) fn close_orchestration(&mut self) {
+        for group in self.orchestration.jobs.stop_all() {
+            crate::platform::kill_process_group_id(group);
+        }
+        self.save_orchestration_now();
+    }
+
+    /// Saves changed state at once.
     pub(crate) fn save_orchestration_now(&mut self) {
         if !std::mem::take(&mut self.orchestration.dirty) {
             return;
@@ -1011,9 +1093,14 @@ impl App {
             let Some(target) = terminal(self, &delivery.pane_id) else {
                 continue;
             };
+            // A saved file gets the same checks as a request.
+            let text = deliveries::sanitize(&delivery.text);
+            if text.trim().is_empty() || !self.orchestration.deliveries.has_room(&target) {
+                continue;
+            }
             let mut restored = self.orchestration.deliveries.push(
                 target,
-                delivery.text,
+                text,
                 delivery.source,
                 delivery.queued_at_ms,
                 None,
@@ -1076,25 +1163,28 @@ impl App {
                 },
                 None => None,
             };
-            self.orchestration.jobs.add(
-                JobSpec {
-                    name: job.name,
-                    command: job.command,
-                    cwd: job.cwd,
-                    env: job.env,
-                    every: job.every_ms.map(Duration::from_millis),
-                    on_events: job.on_events,
-                    on_path: job.on_path.map(PathBuf::from),
-                    target,
-                    owner,
-                    timeout: Duration::from_millis(job.timeout_ms),
-                    until_ms: job.until_ms,
-                    dedupe: job.dedupe,
-                }
-                .within_limits(),
-                job.last_news,
-                now,
-            );
+            let spec = JobSpec {
+                name: job.name,
+                command: job.command,
+                cwd: job.cwd,
+                env: job.env,
+                every: job.every_ms.map(Duration::from_millis),
+                on_events: job.on_events,
+                on_path: job.on_path.map(PathBuf::from),
+                target,
+                owner,
+                timeout: Duration::from_millis(job.timeout_ms),
+                until_ms: job.until_ms,
+                dedupe: job.dedupe,
+            };
+            let hookable = crate::api::schema::plugin_hook_event_names();
+            let Some(spec) = spec.checked_as_saved(&hookable) else {
+                tracing::warn!("a saved job that no request could make was dropped");
+                continue;
+            };
+            if self.orchestration.jobs.len() < jobs::MAX_JOBS {
+                self.orchestration.jobs.add(spec, job.last_news, now);
+            }
         }
     }
 
@@ -1311,7 +1401,11 @@ impl App {
             self.orchestration.dirty = true;
         }
         if let Some((target, text)) = outcome.deliver {
-            self.enqueue_server_delivery(target, text, format!("job:{name}"));
+            // News counts as told only when it was queued, so that news a full queue refused
+            // is delivered by a later run with the same output.
+            if self.enqueue_server_delivery(target, text.clone(), format!("job:{name}")) {
+                self.orchestration.jobs.note_news_delivered(name, text);
+            }
         }
         // Not through `emit_event`: a job must not be able to run on its own end.
         self.event_hub.push(EventEnvelope {
@@ -1398,14 +1492,22 @@ fn run_job_command(run: &JobRun, target_pane_id: Option<String>) -> (Option<i32>
             return (None, String::new());
         }
     };
-    // The reader hands over what it has when the output closes. It is never joined, because a
-    // process the command left behind can keep the output open.
-    let (output_tx, output_rx) = std::sync::mpsc::channel();
+    run.cancel.set_group(child.id());
+    // The reader is never joined, because a process the command left behind can keep the output
+    // open. What it has read is shared, so output printed before such a wait is not lost.
+    let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel();
     if let Some(stdout) = child.stdout.take() {
+        let output = output.clone();
         std::thread::spawn(move || {
-            let mut text = Vec::new();
-            let _ = stdout.take(JOB_OUTPUT_MAX_BYTES).read_to_end(&mut text);
-            let _ = output_tx.send(String::from_utf8_lossy(&text).into_owned());
+            let mut stdout = stdout.take(JOB_OUTPUT_MAX_BYTES);
+            let mut chunk = [0u8; 4096];
+            while let Ok(count @ 1..) = stdout.read(&mut chunk) {
+                if let Ok(mut output) = output.lock() {
+                    output.extend_from_slice(&chunk[..count]);
+                }
+            }
+            let _ = closed_tx.send(());
         });
     }
     let deadline = Instant::now() + spec.timeout;
@@ -1414,7 +1516,11 @@ fn run_job_command(run: &JobRun, target_pane_id: Option<String>) -> (Option<i32>
             Ok(Some(status)) => {
                 // Whatever the command left running goes with it, which also closes the output.
                 crate::platform::kill_process_group(&mut child);
-                let stdout = output_rx.recv_timeout(JOB_OUTPUT_GRACE).unwrap_or_default();
+                let _ = closed_rx.recv_timeout(JOB_OUTPUT_GRACE);
+                let stdout = output
+                    .lock()
+                    .map(|output| String::from_utf8_lossy(&output).into_owned())
+                    .unwrap_or_default();
                 return (status.code(), stdout);
             }
             Ok(None) if run.cancel.is_set() => {

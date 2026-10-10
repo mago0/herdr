@@ -17,14 +17,22 @@ pub(crate) fn isolate_process_group(command: &mut std::process::Command) {
 
 /// Stops a child that leads its own process group, and every process still in that group.
 pub(crate) fn kill_process_group(child: &mut std::process::Child) {
-    if let Ok(group) = libc::pid_t::try_from(child.id()) {
-        // SAFETY: `killpg` takes a group id and a signal and touches no memory. A group that is
-        // already gone gives ESRCH, which needs no action.
-        unsafe {
-            libc::killpg(group, libc::SIGKILL);
-        }
-    }
+    kill_process_group_id(child.id());
     let _ = child.kill();
+}
+
+/// Stops every process in the group that `group` names. The id must come from a child started
+/// with [`isolate_process_group`].
+pub(crate) fn kill_process_group_id(group: u32) {
+    // 0 and 1 would name this process's own group and every process.
+    let Some(group) = libc::pid_t::try_from(group).ok().filter(|group| *group > 1) else {
+        return;
+    };
+    // SAFETY: `killpg` takes a group id and a signal and touches no memory. A group that is
+    // already gone gives ESRCH, which needs no action.
+    unsafe {
+        libc::killpg(group, libc::SIGKILL);
+    }
 }
 
 pub(crate) fn read_fd(fd: std::os::fd::RawFd, data: &mut [u8]) -> std::io::Result<usize> {
