@@ -554,9 +554,12 @@ Herdr resumes supported Agent conversations after a server restart by default:
 [session]
 resume_agents_on_restore = true
 startup_per_agent_delay_ms = 100
+agent_stall_after_secs = 600
 ```
 
 Automatic restores start one agent at a time, 100 milliseconds apart by default, to reduce startup contention. The first eligible agent starts immediately. Set `startup_per_agent_delay_ms = 0` to disable spacing. Manual launches and explicit terminal attaches are unaffected. Restart the Herdr server to apply changes.
+
+An agent that reports working while its screen stays unchanged for `agent_stall_after_secs` is marked stalled on its record and in the `pane.agent_stalled` event. Set it to `0` to turn the check off.
 
 Only panes with a valid native session reference from an official integration can resume; other panes restore as normal shells. See [Session state and restore](/docs/session-state/) for supported Agents and persistence behavior.
 

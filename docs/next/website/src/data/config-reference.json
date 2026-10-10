@@ -1465,6 +1465,12 @@
           "type": "integer",
           "default": "100",
           "description": "Milliseconds between automatic agent restores after a server restart. The first agent starts without this delay; 0 disables spacing. Does not delay manual launches or explicit terminal attaches. Restart the server to apply."
+        },
+        {
+          "key": "session.agent_stall_after_secs",
+          "type": "integer",
+          "default": "600",
+          "description": "Seconds an agent may report working with an unchanged screen before it counts as stalled. 0 disables the check."
         }
       ]
     },

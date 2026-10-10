@@ -103,15 +103,32 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.supervise`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
-| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
-| Events | `events.subscribe`, `events.wait` |
+| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.deliver`, `agent.deliveries`, `agent.cancel_delivery`, `agent.view.set`, `agent.view.clear` |
+| Job | `job.add`, `job.list`, `job.run`, `job.remove` |
+| Events | `events.subscribe`, `events.wait`, `events.read` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
 
 `agent.wait` is server-owned and event-driven. It pins the resolved pane occupant so a replacement cannot satisfy the wait. `agent.prompt` accepts an optional `wait` object with `until` and `timeout_ms`; this submits the prompt and starts the wait in one request, avoiding a race between separate calls. If the resolved agent is already `blocked`, `agent.prompt` returns `agent_blocked` without sending input or starting the wait.
+
+### Deliveries, supervision, jobs and event history
+
+`agent.deliver` hands a prompt to the server for a pane, named by agent name or pane ID. The server types it as one ordered submission when the pane hosts a ready agent, the agent is not `blocked`, and the pane is not the focused pane of an attached client. Until then the delivery waits. Deliveries for one pane are typed in order, one at a time. The result has `delivery.state`: `delivered` or `queued`. `ttl_ms` drops a delivery that still waits after that time. `agent.deliveries` lists the ones that wait, and `agent.cancel_delivery` removes one. A delivery is dropped when its pane closes.
+
+`pane.supervise` records the pane that supervises a pane: `{ "pane_id": "w2:p1", "supervisor": "lead", "report": ["blocked", "exited", "stalled"] }`. Leave out `supervisor` to clear the link. For each condition in `report` the server delivers one line to the supervisor pane: `HERDR|blocked|<agent>|<pane>|<what the agent shows>`, `HERDR|stalled|<agent>|<pane>|<seconds>`, or `HERDR|exited|<agent>|<pane>`. A link that would make a pane its own supervisor is refused, and a link ends when either pane closes.
+
+`job.add` runs a command with no pane, on an interval (`every_ms`, at least 1000), on events (`on_events`, any event a plugin hook can use), or when a file changes (`on_path`). A run that exits 0 and prints text has news. With `target`, the server delivers that text to the target pane; news equal to the last news of the job is not delivered again unless `dedupe` is false. A job is removed when its target pane or its `owner_pane_id` pane closes, at `until_ms`, or by `job.remove`. The command gets `HERDR_JOB_NAME`, `HERDR_JOB_TARGET_PANE_ID`, and for an event `HERDR_JOB_EVENT` and `HERDR_JOB_EVENT_JSON`.
+
+`events.read` returns the events after a sequence number: `{ "after": 120, "kinds": ["pane.closed"], "limit": 100 }` gives `{ epoch, latest, lost, events: [{ seq, event, data }] }`. `epoch` names one run of the server, and a cursor from another epoch is void. `lost` is true when the cursor is older than the history the server keeps. Without `after` the call returns `epoch` and `latest` and no events.
+
+An agent record has four optional fields for this: `supervisor_pane_id`, `pending_deliveries`, `stalled_secs` (the agent reports working and its screen has not changed for at least `session.agent_stall_after_secs`), and `blocker` (what a blocked agent shows). The events `pane.delivery_changed`, `pane.agent_stalled` and `job.finished` are in the history, and the first two can start a plugin hook or a job.
+
+Deliveries, links, jobs, and pane tokens with no time limit are kept in `orchestration.json` in the session directory, so they survive a server restart and a live handoff.
+
+Closing a tab or a workspace emits `pane.closed` for each pane in it, before `tab.closed` and `workspace.closed`.
 
 `workspace.move_block` atomically moves the ordered `workspace_ids` before `before_workspace_id`; omit the anchor to move the block to the end. The ids must be unique and the anchor cannot be part of the block. The response contains the authoritative ordered workspace list.
 
