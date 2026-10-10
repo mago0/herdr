@@ -1,5 +1,7 @@
 # herdr
 
+> This is a personal fork. [FORK.md](FORK.md) says what it adds and how to set up the sidebar tree.
+
 
 <p align="center">
   <img src="assets/logo.png" alt="herdr" width="100" />
