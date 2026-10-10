@@ -50,7 +50,7 @@ impl SpawnedHerdr {
 impl Drop for SpawnedHerdr {
     fn drop(&mut self) {
         let pid = self.child.process_id();
-        let _ = self.child.kill();
+        support::stop_spawned_herdr(&mut *self.child);
         self.close_master();
 
         if let Some(pid) = pid {
@@ -131,6 +131,7 @@ fn spawn_client_process_with_args_and_env(
     fs::write(app_dir.join("sidebar-plugin-notice"), "herdr-tree:tree").unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.args(args);
     cmd.env("HERDR_DISABLE_SOUND", "1");
     cmd.env("XDG_STATE_HOME", runtime_dir.join("state"));
@@ -191,6 +192,7 @@ fn spawn_server_with_config(
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -441,6 +443,7 @@ fn client_sees_headless_startup_config_diagnostic() {
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", &config_home);
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);
@@ -1133,7 +1136,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         || screen_text().contains("local-online")
     ));
 
-    local.child.kill().unwrap();
+    support::stop_spawned_herdr(&mut *local.child);
     local.close_master();
     drop(local);
     assert!(
@@ -1231,7 +1234,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     ));
 
     let watermark = output_len(&output);
-    remote_server.child.kill().unwrap();
+    support::stop_spawned_herdr(&mut *remote_server.child);
     assert!(
         wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
             read_output(&output)[watermark..].contains("reconnecting")
@@ -2074,6 +2077,7 @@ fn client_receives_notify_on_agent_state_change() {
         .unwrap();
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    support::isolate_herdr_test_process(&mut cmd);
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", &config_home);
     cmd.env("XDG_RUNTIME_DIR", &runtime_dir);

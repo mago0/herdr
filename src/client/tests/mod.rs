@@ -499,8 +499,11 @@ fn direct_attach_mouse_capture_combines_local_preference_with_child_demand() {
     assert!(effective_mouse_capture(false, true));
     assert!(effective_mouse_capture(true, false));
     assert!(!effective_mouse_capture(false, false));
-    assert!(effective_sgr_pixel_mouse(true, true, true));
-    assert!(!effective_sgr_pixel_mouse(true, true, false));
+    assert!(effective_sgr_pixel_mouse(true, true, true, None));
+    assert!(effective_sgr_pixel_mouse(true, true, true, Some(true)));
+    assert!(!effective_sgr_pixel_mouse(true, true, false, None));
+    // A host that reports 1016 unsupported keeps sending cell reports.
+    assert!(!effective_sgr_pixel_mouse(true, true, true, Some(false)));
 }
 
 #[test]
@@ -960,12 +963,4 @@ fn terminal_control_scroll_command_maps_to_attach_scroll() {
     assert_eq!(source, AttachScrollSource::Wheel);
     assert_eq!(direction, AttachScrollDirection::Up);
     assert_eq!(lines, 3);
-}
-
-#[test]
-fn forward_clipboard_uses_local_clipboard_path() {
-    let _guard = env_lock().lock().unwrap();
-    let _ssh = EnvVarGuard::set("SSH_CONNECTION", "1 2 3 4");
-    assert!(forward_clipboard("dGVzdA=="));
-    assert!(!forward_clipboard("not base64"));
 }

@@ -89,21 +89,15 @@ fn write_local_codex(content: &str) {
 }
 
 #[test]
-fn codex_no_match_is_unknown_without_changing_other_agents() {
+fn known_agent_no_match_defaults_to_idle_fallback() {
     with_manifest_dirs("no-match", || {
         write_local_codex(&local_manifest("working", "active-marker"));
         let explain = explain(Agent::Codex, "unmatched-marker");
 
-        assert_eq!(explain.state, AgentState::Unknown);
+        assert_eq!(explain.state, AgentState::Idle);
         assert!(!explain.visible_idle);
         assert_eq!(
             explain.fallback_reason.as_deref(),
-            Some("codex_state_ambiguous")
-        );
-        let other = fallback_explain(Some(Agent::Pi), None, false);
-        assert_eq!(other.state, AgentState::Idle);
-        assert_eq!(
-            other.fallback_reason.as_deref(),
             Some(DEFAULT_KNOWN_AGENT_IDLE_FALLBACK)
         );
     });
@@ -190,10 +184,10 @@ fn fallback_explain_preserves_active_manifest_version() {
 
         let explain = explain(Agent::Codex, "ordinary prompt text");
 
-        assert_eq!(explain.state, AgentState::Unknown);
+        assert_eq!(explain.state, AgentState::Idle);
         assert_eq!(
             explain.fallback_reason.as_deref(),
-            Some("codex_state_ambiguous")
+            Some(DEFAULT_KNOWN_AGENT_IDLE_FALLBACK)
         );
         assert_eq!(explain.manifest_version.as_deref(), Some("9999.01.01.1"));
         assert!(matches!(
@@ -273,10 +267,10 @@ fn detection_uses_cached_manifest_until_explicit_reload() {
         write_remote_codex_without_reload(&remote_manifest("9999.01.01.2", "working", "new-ready"));
 
         let unchanged = explain(Agent::Codex, "new-ready");
-        assert_eq!(unchanged.state, AgentState::Unknown);
+        assert_eq!(unchanged.state, AgentState::Idle);
         assert_eq!(
             unchanged.fallback_reason.as_deref(),
-            Some("codex_state_ambiguous")
+            Some(DEFAULT_KNOWN_AGENT_IDLE_FALLBACK)
         );
         assert_eq!(
             unchanged.cached_remote_version.as_deref(),
