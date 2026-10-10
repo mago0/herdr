@@ -533,6 +533,8 @@ pub(super) enum ClientContextMenuAction {
     ToggleRightClickPassthrough,
     ClosePane,
     Label,
+    /// Press the key of one answer of the dialog the row's agent shows, by its place in the list.
+    Answer(usize),
 }
 
 #[derive(Debug)]
@@ -565,10 +567,12 @@ pub(super) struct ClientContextMenuOverlay {
     pub(super) highlighted: usize,
     /// The agent pane of a sidebar plugin row and the label it has. It adds the label item.
     pub(super) label_pane: Option<(String, String)>,
+    /// Key and text of each answer of the dialog that agent shows. Each adds an answer item.
+    pub(super) answers: Vec<(String, String)>,
 }
 
 pub(super) struct ClientContextMenuItem {
-    pub(super) label: &'static str,
+    pub(super) label: std::borrow::Cow<'static, str>,
     pub(super) action: ClientContextMenuAction,
 }
 

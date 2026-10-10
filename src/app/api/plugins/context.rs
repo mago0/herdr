@@ -139,6 +139,7 @@ impl App {
                     context.tab_id = Some(layout.tab_id.clone());
                     context
                 }),
+            EventData::JobFinished { .. } => empty_plugin_context(correlation_id),
             EventData::PaneCreated { pane } | EventData::PaneUpdated { pane } => {
                 self.plugin_context_for_pane_info(pane, correlation_id)
             }
@@ -168,6 +169,16 @@ impl App {
                 workspace_id,
             }
             | EventData::PaneAgentDetected {
+                pane_id,
+                workspace_id,
+                ..
+            }
+            | EventData::PaneDeliveryChanged {
+                pane_id,
+                workspace_id,
+                ..
+            }
+            | EventData::PaneAgentStalled {
                 pane_id,
                 workspace_id,
                 ..

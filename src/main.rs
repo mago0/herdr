@@ -405,6 +405,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # resume_agents_on_restore = true
 # Milliseconds between automatic agent restores; 0 starts them without spacing.
 # startup_per_agent_delay_ms = 100
+# Seconds an agent may report working with an unchanged screen before it counts
+# as stalled; 0 disables the check.
+# agent_stall_after_secs = 600
 
 [remote]
 # Whether herdr manages the ssh config used for `herdr --remote`.

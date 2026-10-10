@@ -3286,6 +3286,11 @@ impl HeadlessServer {
                 .app
                 .start_pending_agent_resumes(now, self.app.pending_agent_resume_due(now));
         }
+
+        if self.app.orchestration.tick_due(now) {
+            self.app.orchestration.client_attached = self.has_app_client();
+            self.app.run_orchestration_tick(now);
+        }
         changed
     }
 }

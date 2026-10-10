@@ -270,6 +270,9 @@ pub struct SessionConfig {
     pub resume_agents_on_restore: bool,
     /// Milliseconds between automatic agent restores. Zero disables spacing.
     pub startup_per_agent_delay_ms: u32,
+    /// Seconds an agent may report working with an unchanged screen before it
+    /// counts as stalled. Zero disables the check. Default: 600.
+    pub agent_stall_after_secs: u32,
 }
 
 impl Default for SessionConfig {
@@ -277,6 +280,7 @@ impl Default for SessionConfig {
         Self {
             resume_agents_on_restore: true,
             startup_per_agent_delay_ms: 100,
+            agent_stall_after_secs: 600,
         }
     }
 }

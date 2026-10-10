@@ -1,12 +1,37 @@
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct EventHub {
     inner: std::sync::Arc<std::sync::Mutex<EventHubState>>,
+    /// Identifies this run of the hub. Sequence numbers start again in a new run.
+    epoch: std::sync::Arc<str>,
+}
+
+impl Default for EventHub {
+    fn default() -> Self {
+        static NEXT_HUB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or(0);
+        let hub = NEXT_HUB.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self {
+            inner: Default::default(),
+            epoch: format!("{nanos:x}-{:x}-{hub:x}", std::process::id()).into(),
+        }
+    }
 }
 
 #[derive(Default)]
 struct EventHubState {
     next_sequence: u64,
     events: Vec<(u64, crate::api::schema::EventEnvelope)>,
+}
+
+/// One answer to a caller that reads history with a cursor.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct EventHistory {
+    pub(crate) latest: u64,
+    pub(crate) lost: bool,
+    pub(crate) events: Vec<(u64, crate::api::schema::EventEnvelope)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,7 +41,8 @@ pub(super) enum EventHistoryError {
 }
 
 impl EventHub {
-    const MAX_EVENTS: usize = 512;
+    // Tests that fill the history over a socket keep the small size.
+    const MAX_EVENTS: usize = if cfg!(test) { 512 } else { 4096 };
 
     pub fn push(&self, event: crate::api::schema::EventEnvelope) {
         let Ok(mut state) = self.inner.lock() else {
@@ -66,6 +92,49 @@ impl EventHub {
             .collect())
     }
 
+    pub(crate) fn epoch(&self) -> &str {
+        &self.epoch
+    }
+
+    /// Events after a cursor, oldest first. `kinds` keeps only those dotted names; `limit` caps
+    /// the count, and a caller that gets a full page reads again from its last sequence.
+    pub(crate) fn read(&self, after: Option<u64>, kinds: &[String], limit: usize) -> EventHistory {
+        let Ok(state) = self.inner.lock() else {
+            return EventHistory {
+                latest: 0,
+                lost: true,
+                events: Vec::new(),
+            };
+        };
+        let latest = state.next_sequence;
+        let Some(after) = after else {
+            return EventHistory {
+                latest,
+                lost: false,
+                events: Vec::new(),
+            };
+        };
+        let oldest_known = state
+            .events
+            .first()
+            .map_or(latest, |(first, _)| first.saturating_sub(1));
+        let events = state
+            .events
+            .iter()
+            .filter(|(sequence, _)| *sequence > after)
+            .filter(|(_, event)| {
+                kinds.is_empty() || kinds.iter().any(|kind| kind == event.event.dot_name())
+            })
+            .take(limit)
+            .cloned()
+            .collect();
+        EventHistory {
+            latest,
+            lost: after < oldest_known || after > latest,
+            events,
+        }
+    }
+
     pub fn current_sequence(&self) -> u64 {
         let Ok(state) = self.inner.lock() else {
             return 0;
@@ -86,6 +155,76 @@ mod tests {
                 workspace_id: "workspace_1".into(),
             },
         }
+    }
+
+    fn pane_closed(pane: &str) -> EventEnvelope {
+        EventEnvelope {
+            event: EventKind::PaneClosed,
+            data: EventData::PaneClosed {
+                pane_id: pane.into(),
+                workspace_id: "w1".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_read_without_a_cursor_returns_the_latest_sequence_and_no_events() {
+        let hub = EventHub::default();
+        hub.push(event());
+        hub.push(event());
+        let history = hub.read(None, &[], 100);
+        assert_eq!((history.latest, history.lost), (2, false));
+        assert!(history.events.is_empty());
+    }
+
+    #[test]
+    fn a_read_returns_the_events_after_the_cursor_in_order() {
+        let hub = EventHub::default();
+        hub.push(event());
+        hub.push(pane_closed("w1:p1"));
+        hub.push(pane_closed("w1:p2"));
+        let history = hub.read(Some(1), &[], 100);
+        assert!(!history.lost);
+        assert_eq!(history.latest, 3);
+        assert_eq!(
+            history.events,
+            vec![(2, pane_closed("w1:p1")), (3, pane_closed("w1:p2"))]
+        );
+        assert!(hub.read(Some(3), &[], 100).events.is_empty());
+    }
+
+    #[test]
+    fn a_read_keeps_only_the_named_kinds_and_stops_at_the_limit() {
+        let hub = EventHub::default();
+        hub.push(event());
+        hub.push(pane_closed("w1:p1"));
+        hub.push(event());
+        hub.push(pane_closed("w1:p2"));
+        let kinds = vec!["pane.closed".to_string()];
+        let all = hub.read(Some(0), &kinds, 100);
+        assert_eq!(
+            all.events.iter().map(|(seq, _)| *seq).collect::<Vec<_>>(),
+            vec![2, 4]
+        );
+        let first = hub.read(Some(0), &kinds, 1);
+        assert_eq!(first.events.len(), 1);
+        assert_eq!(first.events[0].0, 2);
+    }
+
+    #[test]
+    fn a_cursor_older_than_the_history_or_from_another_run_is_reported_lost() {
+        let hub = EventHub::default();
+        for _ in 0..EventHub::MAX_EVENTS + 10 {
+            hub.push(event());
+        }
+        assert!(hub.read(Some(5), &[], 10).lost);
+        assert!(!hub.read(Some(10), &[], 10).lost);
+        assert!(hub.read(Some(999_999), &[], 10).lost);
+    }
+
+    #[test]
+    fn each_hub_has_its_own_epoch() {
+        assert_ne!(EventHub::default().epoch(), EventHub::default().epoch());
     }
 
     #[test]

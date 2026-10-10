@@ -4,10 +4,22 @@ impl ClientContextMenuOverlay {
     pub(super) fn items(&self) -> Vec<ClientContextMenuItem> {
         use ClientContextMenuAction as Action;
 
-        let item = |label, action| ClientContextMenuItem { label, action };
-        let mut items = self.target_items();
+        let mut items = Vec::new();
         if self.label_pane.is_some() {
-            items.push(item("Label...", Action::Label));
+            // The answers come first: they are why a person opens the menu of a blocked row.
+            for (index, (key, text)) in self.answers.iter().enumerate() {
+                items.push(ClientContextMenuItem {
+                    label: format!("Answer: {key}. {text}").into(),
+                    action: Action::Answer(index),
+                });
+            }
+        }
+        items.extend(self.target_items());
+        if self.label_pane.is_some() {
+            items.push(ClientContextMenuItem {
+                label: "Label...".into(),
+                action: Action::Label,
+            });
         }
         items
     }
@@ -15,7 +27,10 @@ impl ClientContextMenuOverlay {
     fn target_items(&self) -> Vec<ClientContextMenuItem> {
         use ClientContextMenuAction as Action;
 
-        let item = |label, action| ClientContextMenuItem { label, action };
+        let item = |label: &'static str, action| ClientContextMenuItem {
+            label: label.into(),
+            action,
+        };
         match &self.target {
             ClientContextMenuTarget::Workspace { is_git: false, .. } => {
                 vec![item("Rename", Action::Rename), item("Close", Action::Close)]
@@ -132,6 +147,7 @@ impl ClientShellState {
             y,
             highlighted: 0,
             label_pane: None,
+            answers: Vec::new(),
         }));
     }
 
@@ -152,6 +168,7 @@ impl ClientShellState {
             y,
             highlighted: 0,
             label_pane: None,
+            answers: Vec::new(),
         }));
     }
 
@@ -178,6 +195,7 @@ impl ClientShellState {
             y,
             highlighted: 0,
             label_pane: None,
+            answers: Vec::new(),
         }));
     }
 
@@ -205,6 +223,23 @@ impl ClientShellState {
             outcome.repaint = true;
             return;
         };
+        if let ClientContextMenuAction::Answer(index) = action {
+            if let (Some((pane_id, _)), Some((key, _))) =
+                (menu.label_pane, menu.answers.get(index).cloned())
+            {
+                self.push_endpoint_method(
+                    crate::api::schema::Method::AgentSendKeys(
+                        crate::api::schema::AgentSendKeysParams {
+                            target: pane_id,
+                            keys: vec![key],
+                        },
+                    ),
+                    outcome,
+                );
+            }
+            outcome.repaint = true;
+            return;
+        }
         if action == ClientContextMenuAction::Label {
             if let Some((pane_id, label)) = menu.label_pane {
                 self.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {

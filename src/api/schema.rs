@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 pub mod agents;
 pub mod commands;
 pub mod common;
+pub mod deliveries;
 pub mod events;
 pub mod integrations;
+pub mod jobs;
 pub mod panes;
 pub mod plugins;
 pub mod response;
@@ -17,8 +19,10 @@ pub mod worktrees;
 pub use agents::*;
 pub use commands::*;
 pub use common::*;
+pub use deliveries::*;
 pub use events::*;
 pub use integrations::*;
+pub use jobs::*;
 pub use panes::*;
 pub use plugins::*;
 pub use response::*;
@@ -139,6 +143,20 @@ pub enum Method {
     AgentPrompt(AgentPromptParams),
     #[serde(rename = "agent.wait")]
     AgentWait(AgentWaitParams),
+    #[serde(rename = "agent.deliver")]
+    AgentDeliver(AgentDeliverParams),
+    #[serde(rename = "agent.deliveries")]
+    AgentDeliveries(AgentDeliveriesParams),
+    #[serde(rename = "agent.cancel_delivery")]
+    AgentCancelDelivery(AgentCancelDeliveryParams),
+    #[serde(rename = "job.add")]
+    JobAdd(JobAddParams),
+    #[serde(rename = "job.list")]
+    JobList(EmptyParams),
+    #[serde(rename = "job.remove")]
+    JobRemove(JobTarget),
+    #[serde(rename = "job.run")]
+    JobRun(JobTarget),
     #[serde(rename = "pane.split")]
     PaneSplit(PaneSplitParams),
     #[serde(rename = "pane.swap")]
@@ -207,6 +225,8 @@ pub enum Method {
     PaneReportAgentSession(PaneReportAgentSessionParams),
     #[serde(rename = "pane.report_metadata")]
     PaneReportMetadata(PaneReportMetadataParams),
+    #[serde(rename = "pane.supervise")]
+    PaneSupervise(PaneSuperviseParams),
     #[serde(rename = "pane.clear_agent_authority")]
     PaneClearAgentAuthority(PaneClearAgentAuthorityParams),
     #[serde(rename = "pane.release_agent")]
@@ -219,6 +239,8 @@ pub enum Method {
     EventsSubscribe(EventsSubscribeParams),
     #[serde(rename = "events.wait")]
     EventsWait(EventsWaitParams),
+    #[serde(rename = "events.read")]
+    EventsRead(EventsReadParams),
     #[serde(rename = "pane.wait_for_output")]
     PaneWaitForOutput(PaneWaitForOutputParams),
     #[serde(rename = "integration.list")]

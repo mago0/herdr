@@ -163,6 +163,7 @@ impl App {
                 .state
                 .terminal_ids_for_tab(target_ws_idx, target_tab_idx);
             let plugin_pane_ids = self.state.pane_ids_for_tab(target_ws_idx, target_tab_idx);
+            let closed_panes = self.public_pane_ids_in(target_ws_idx, Some(target_tab_idx));
             let Some(ws) = self.state.workspaces.get_mut(target_ws_idx) else {
                 return encode_error(id, "tab_not_found", "tab not found");
             };
@@ -170,6 +171,7 @@ impl App {
                 self.state.remove_plugin_pane_records(plugin_pane_ids);
                 self.state.remove_unattached_terminal_ids(terminal_ids);
                 self.shutdown_detached_terminal_runtimes();
+                self.emit_panes_closed(closed_panes);
                 self.emit_event(EventEnvelope {
                     event: EventKind::TabClosed,
                     data: EventData::TabClosed {

@@ -171,7 +171,7 @@ pub(crate) fn render_context_menu(
     let screen = buffer.area;
     let max_item_width = items
         .iter()
-        .map(|item| display_width(item.label))
+        .map(|item| display_width(&item.label))
         .max()
         .unwrap_or(0);
     let width = max_item_width
@@ -208,7 +208,7 @@ pub(crate) fn render_context_menu(
             Style::default().fg(palette.text).bg(palette.panel_bg)
         };
         buffer.set_style(row, style);
-        put_text(buffer, row.x, row.y, row.width, item.label, style);
+        put_text(buffer, row.x, row.y, row.width, &item.label, style);
         rows.push((row, index));
     }
     Some(OverlayRender {

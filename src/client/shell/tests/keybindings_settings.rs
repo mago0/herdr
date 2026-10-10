@@ -1210,6 +1210,86 @@ async fn sidebar_plugin_row_menu_sets_and_clears_the_label_of_its_agent_pane() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn sidebar_plugin_row_menu_answers_a_blocked_agent_with_the_key_of_the_answer() {
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = "fake:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    // The second title form is JSON: the row, the pane of its agent, and the answers of its dialog.
+    state.set_sidebar_plugin_resolver(fake_sidebar_plugin(
+        "printf '\\033[?1000h\\033[?1006hREADY'; stty raw -echo; while :; do c=$(dd bs=1 count=1 2>/dev/null); case \"$c\" in M) printf '\\033]2;herdr-menu2;{\"kind\":\"workspace\",\"id\":\"ws_1\",\"agent_pane\":\"pane_1\",\"label\":\"OLD-1\",\"answers\":[{\"key\":\"1\",\"text\":\"Tea\"},{\"key\":\"2\",\"text\":\"Coffee\"}]}\\007DONE';; esac; done",
+    ));
+    state.set_snapshot(Box::new(snapshot()));
+    sidebar_text_when(&mut state, |text| text.contains("READY")).await;
+    let body = state.hits.sidebar_plugins[0];
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: body.x + 3,
+        row: body.y + 1,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    sidebar_text_when(&mut state, |text| text.contains("DONE")).await;
+    state.tick_sidebar_plugins(std::time::Instant::now());
+    let labels = match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => menu
+            .items()
+            .iter()
+            .map(|item| item.label.to_string())
+            .collect::<Vec<_>>(),
+        other => panic!("context menu, got {other:?}"),
+    };
+    assert!(labels.contains(&"Label...".to_string()), "{labels:?}");
+    // The answers come first: they are why a person opens the menu of a blocked row.
+    assert_eq!(&labels[..2], ["Answer: 1. Tea", "Answer: 2. Coffee"]);
+
+    let mut outcome = ClientShellInput::default();
+    state.activate_context_menu_item(1, &mut outcome);
+    let [ClientShellAction::Endpoint { request, .. }] = &outcome.actions[..] else {
+        panic!("one endpoint request, got {:?}", outcome.actions);
+    };
+    match &request.method {
+        crate::api::schema::Method::AgentSendKeys(params) => {
+            assert_eq!(params.target, "pane_1");
+            assert_eq!(params.keys, vec!["2".to_string()]);
+        }
+        other => panic!("agent send keys, got {other:?}"),
+    }
+    assert!(state.overlay.is_none());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sidebar_plugin_menu_ignores_answers_that_are_not_one_plain_key() {
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = "fake:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_sidebar_plugin_resolver(fake_sidebar_plugin(
+        "printf '\\033[?1000h\\033[?1006hREADY'; stty raw -echo; while :; do c=$(dd bs=1 count=1 2>/dev/null); case \"$c\" in M) printf '\\033]2;herdr-menu2;{\"kind\":\"workspace\",\"id\":\"ws_1\",\"agent_pane\":\"pane_1\",\"answers\":[{\"key\":\"ctrl+c\",\"text\":\"Stop\"},{\"key\":\"12\",\"text\":\"Two keys\"},{\"key\":\"3\",\"text\":\"Fine\"}]}\\007DONE';; esac; done",
+    ));
+    state.set_snapshot(Box::new(snapshot()));
+    sidebar_text_when(&mut state, |text| text.contains("READY")).await;
+    let body = state.hits.sidebar_plugins[0];
+    state.handle_raw_events(vec![RawInputEvent::Mouse(crossterm::event::MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right),
+        column: body.x + 3,
+        row: body.y + 1,
+        modifiers: KeyModifiers::NONE,
+    })]);
+    sidebar_text_when(&mut state, |text| text.contains("DONE")).await;
+    state.tick_sidebar_plugins(std::time::Instant::now());
+    match state.overlay.as_ref() {
+        Some(ClientShellOverlay::ContextMenu(menu)) => {
+            let answers = menu
+                .items()
+                .iter()
+                .map(|item| item.label.to_string())
+                .filter(|label| label.starts_with("Answer"))
+                .collect::<Vec<_>>();
+            assert_eq!(answers, ["Answer: 3. Fine"]);
+        }
+        other => panic!("context menu, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn sidebar_plugin_row_menu_has_no_label_item_without_an_agent_pane() {
     let mut config = Config::default();
     config.ui.sidebar.spaces.plugin = "fake:pane".into();

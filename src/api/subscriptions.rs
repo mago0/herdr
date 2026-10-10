@@ -433,6 +433,7 @@ impl ActiveAgentStatusChangedSubscription {
             title,
             display_agent,
             state_labels,
+            ..
         } = event.data
         else {
             return None;
@@ -679,6 +680,7 @@ mod tests {
                 title: title.map(str::to_string),
                 display_agent: None,
                 state_labels: HashMap::new(),
+                blocker: None,
             },
         }
     }

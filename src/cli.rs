@@ -28,6 +28,7 @@ mod completion;
 mod integration;
 mod machine;
 mod notification;
+mod orchestration;
 mod pane;
 mod plugin;
 mod protocol_guard;
@@ -125,6 +126,8 @@ pub fn maybe_run(args: &[String]) -> std::io::Result<CommandOutcome> {
         "tab" => tab::run_tab_command(&args[2..])?,
         "notification" => notification::run_notification_command(&args[2..])?,
         "agent" => agent::run_agent_command(&args[2..])?,
+        "job" => orchestration::run_job_command(&args[2..])?,
+        "events" => orchestration::run_events_command(&args[2..])?,
         "terminal" => run_terminal_command(&args[2..])?,
         "pane" => pane::run_pane_command(&args[2..])?,
         "plugin" => plugin::run_plugin_command(&args[2..])?,
@@ -387,6 +390,13 @@ fn config_reset_keys(args: &[String]) -> std::io::Result<i32> {
         path.display()
     );
     Ok(0)
+}
+
+pub(super) fn unix_ms_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn key_config_backup_path(path: &std::path::Path) -> std::path::PathBuf {

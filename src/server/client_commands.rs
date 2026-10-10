@@ -13,6 +13,7 @@ pub(crate) const MAX_ENDPOINT_REQUEST_ID_BYTES: usize = 128;
 const ENDPOINT_RESPONSE_CHUNK_BYTES: usize = 512 * 1024;
 
 const CLIENT_SHELL_METHODS: &[&str] = &[
+    "agent.send_keys",
     "client_shell.surface.set",
     "command.invoke",
     "integration.install",
@@ -29,6 +30,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "pane.link.activate",
     "pane.link.resolve",
     "pane.rename",
+    "pane.report_metadata",
     "pane.resize",
     "pane.scroll",
     "pane.selection.read",
@@ -289,6 +291,14 @@ mod tests {
         .expect("endpoint method shape fixture");
         let mut actual = endpoint_method_shape_digests();
         // Freeze additive methods separately without rewriting the published fixture.
+        assert_eq!(
+            actual.remove("agent.send_keys").as_deref(),
+            Some("55951bdf95d3ba4b2a2f72526029f3a7500f2af4c415e308365d0fc75a932ca1")
+        );
+        assert_eq!(
+            actual.remove("pane.report_metadata").as_deref(),
+            Some("c288588cf8ee53e966fa3f060d3b03b7be2654852060d574107e93702e4ba7e7")
+        );
         assert_eq!(
             actual.remove("pane.clear").as_deref(),
             Some("0301d288ba198ddaa427dd7421c71911cccaf4ea03544531efa8b67ca21b08f6")

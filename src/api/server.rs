@@ -448,6 +448,10 @@ fn handle_connection_with_stop(
             )?;
             finish_wait_response(&mut stream, response, &request_id, method, changes_ui)
         }
+        Method::EventsRead(params) => {
+            let response = read_events(request_id.clone(), params, event_hub);
+            finish_wait_response(&mut stream, Some(response), &request_id, method, changes_ui)
+        }
         Method::PaneWaitForOutput(params) => {
             let response =
                 wait_for_output(request_id.clone(), params, &mut stream, api_tx, running)?;
@@ -481,6 +485,47 @@ fn handle_connection_with_stop(
             result
         }
     }
+}
+
+const EVENTS_READ_DEFAULT_LIMIT: u32 = 500;
+const EVENTS_READ_MAX_LIMIT: u32 = 4096;
+
+fn read_events(
+    request_id: String,
+    params: crate::api::schema::EventsReadParams,
+    event_hub: &EventHub,
+) -> String {
+    let known = crate::api::schema::known_event_names_for_read();
+    if let Some(unknown) = params
+        .kinds
+        .iter()
+        .find(|kind| !known.contains(&kind.as_str()))
+    {
+        return error_response_json(
+            request_id,
+            "unknown_event_kind",
+            format!("{unknown} is not an event name"),
+        );
+    }
+    let limit = params
+        .limit
+        .unwrap_or(EVENTS_READ_DEFAULT_LIMIT)
+        .clamp(1, EVENTS_READ_MAX_LIMIT) as usize;
+    let history = event_hub.read(params.after, &params.kinds, limit);
+    serde_json::to_string(&SuccessResponse {
+        id: request_id.clone(),
+        result: crate::api::schema::ResponseResult::EventsRead {
+            epoch: event_hub.epoch().to_string(),
+            latest: history.latest,
+            lost: history.lost,
+            events: history
+                .events
+                .into_iter()
+                .map(|(seq, event)| crate::api::schema::SequencedEvent { seq, event })
+                .collect(),
+        },
+    })
+    .unwrap_or_else(|err| error_response_json(request_id, "internal_error", err.to_string()))
 }
 
 fn finish_wait_response(
@@ -666,6 +711,15 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PluginPaneOpen(_) => "plugin.pane.open",
         Method::PluginPaneFocus(_) => "plugin.pane.focus",
         Method::PluginPaneClose(_) => "plugin.pane.close",
+        Method::EventsRead(_) => "events.read",
+        Method::AgentDeliver(_) => "agent.deliver",
+        Method::AgentDeliveries(_) => "agent.deliveries",
+        Method::AgentCancelDelivery(_) => "agent.cancel_delivery",
+        Method::JobAdd(_) => "job.add",
+        Method::JobList(_) => "job.list",
+        Method::JobRemove(_) => "job.remove",
+        Method::JobRun(_) => "job.run",
+        Method::PaneSupervise(_) => "pane.supervise",
     }
 }
 

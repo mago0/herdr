@@ -39,6 +39,7 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "report-agent" => pane_report_agent(&args[1..]),
         "report-agent-session" => pane_report_agent_session(&args[1..]),
         "release-agent" => pane_release_agent(&args[1..]),
+        "supervise" => super::orchestration::pane_supervise(&args[1..]),
         "report-metadata" => pane_report_metadata(&args[1..]),
         "run" => pane_run(&args[1..]),
         "help" | "--help" | "-h" => {
@@ -1702,6 +1703,10 @@ fn print_pane_help() {
     eprintln!("  herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]");
     eprintln!("  herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
+    eprintln!(
+        "  herdr pane supervise <pane_id> --by <agent|pane> [--report blocked,exited,stalled]"
+    );
+    eprintln!("  herdr pane supervise <pane_id> --clear");
     eprintln!("  herdr pane run <pane_id> <command>");
 }
 

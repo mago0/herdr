@@ -42,6 +42,8 @@ pub(super) fn command() -> Command {
         .subcommand(tab_command())
         .subcommand(notification_command())
         .subcommand(agent_command())
+        .subcommand(job_command())
+        .subcommand(events_command())
         .subcommand(pane_command())
         .subcommand(terminal_command())
         .subcommand(session_command())
@@ -314,6 +316,54 @@ fn notification_command() -> Command {
         )
 }
 
+fn job_command() -> Command {
+    Command::new("job")
+        .about("Run commands on a trigger without a pane")
+        .subcommand(
+            Command::new("add")
+                .about("Add a job, or replace the job with the same name")
+                .override_usage("herdr job add <NAME> [OPTIONS] -- <COMMAND>...")
+                .arg(required("name", "NAME"))
+                .arg(option("every", "DURATION").help("Run on this interval, at least 1s"))
+                .arg(repeatable_option("on", "EVENT").help("Run when this event occurs"))
+                .arg(path_option("path", "FILE").help("Run when this file changes"))
+                .arg(
+                    option("to", "TARGET")
+                        .help("Agent or pane that gets the output of a run that exits 0"),
+                )
+                .arg(path_option("cwd", "DIR"))
+                .arg(repeatable_option("env", "NAME=VALUE"))
+                .arg(option("timeout", "DURATION"))
+                .arg(option("until", "DURATION").help("Remove the job after this time"))
+                .arg(flag("no-dedupe").help("Deliver output that equals the last output again"))
+                .arg(option("owner", "PANE_ID").help("Remove the job when this pane closes"))
+                .arg(flag("no-owner"))
+                .arg(
+                    Arg::new("command")
+                        .value_name("COMMAND")
+                        .num_args(1..)
+                        .last(true)
+                        .required(true),
+                )
+                .after_help("Durations: 500ms, 60s, 5m, 2h, 1d. A bare number is seconds."),
+        )
+        .subcommand(Command::new("list").about("List jobs"))
+        .subcommand(id_command("run", "name", "Run a job now"))
+        .subcommand(id_command("remove", "name", "Remove a job"))
+}
+
+fn events_command() -> Command {
+    Command::new("events")
+        .about("Read event history")
+        .subcommand(
+            Command::new("read")
+                .about("Read events after a sequence number")
+                .arg(option("after", "SEQ"))
+                .arg(repeatable_option("kind", "EVENT"))
+                .arg(option("limit", "N")),
+        )
+}
+
 fn agent_command() -> Command {
     Command::new("agent")
         .about("Control and inspect agent panes")
@@ -329,6 +379,24 @@ fn agent_command() -> Command {
                 .arg(text_ansi_format_option())
                 .arg(flag("ansi")),
         )
+        .subcommand(
+            Command::new("deliver")
+                .about("Type a prompt into an agent when its pane is safe to type into")
+                .arg(required("target", "TARGET"))
+                .arg(required("text", "TEXT"))
+                .arg(option("source", "NAME"))
+                .arg(option("ttl", "DURATION")),
+        )
+        .subcommand(
+            Command::new("deliveries")
+                .about("List deliveries that wait")
+                .arg(Arg::new("target").value_name("TARGET")),
+        )
+        .subcommand(id_command(
+            "cancel-delivery",
+            "delivery_id",
+            "Cancel a delivery that waits",
+        ))
         .subcommand(
             Command::new("send-keys")
                 .about("Send key presses to an agent")
@@ -421,6 +489,9 @@ fn agent_command() -> Command {
                     option("timeout", "MS")
                         .help("Wait for interactive readiness (default: 30000; max: 300000)"),
                 )
+                .arg(flag("no-supervisor").help(
+                    "Do not record the calling pane as the supervisor of the new agent",
+                ))
                 .arg(
                     Arg::new("agent_args")
                         .value_name("AGENT_ARG")
@@ -633,6 +704,20 @@ fn pane_command() -> Command {
         .subcommand(report_agent_session_command())
         .subcommand(release_agent_command())
         .subcommand(report_metadata_command())
+        .subcommand(
+            Command::new("supervise")
+                .about("Set or clear the pane that supervises a pane")
+                .arg(required("pane_id", "PANE_ID"))
+                .arg(
+                    option("by", "TARGET")
+                        .conflicts_with("clear")
+                        .help("Agent or pane that supervises this pane"),
+                )
+                .arg(option("report", "CONDITIONS").help(
+                    "Conditions the server reports to the supervisor: blocked, exited, stalled",
+                ))
+                .arg(flag("clear").help("Remove the link")),
+        )
 }
 
 fn report_agent_command() -> Command {

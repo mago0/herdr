@@ -32,6 +32,12 @@ fn append_codex_paste_boundary(runtime: &crate::terminal::TerminalRuntime, text:
     }
 }
 
+pub(crate) enum AgentSubmitError {
+    NoRuntime,
+    NotForeground,
+    Write(String),
+}
+
 impl App {
     pub(super) fn handle_agent_list(&mut self, id: String) -> String {
         encode_success(
@@ -159,19 +165,6 @@ impl App {
         if terminal.managed_agent_launch_pending() {
             return Err(agent_not_ready(id, &params.target));
         }
-        let Some(runtime) = self.lookup_runtime_sender(resolved.ws_idx, resolved.pane_id) else {
-            return Err(agent_not_found(id, &params.target));
-        };
-        if !super::super::agents::runtime_hosts_agent(runtime, expected_agent) {
-            return Err(encode_error(
-                id,
-                "agent_not_ready",
-                format!(
-                    "agent {} is no longer the pane foreground process",
-                    params.target
-                ),
-            ));
-        }
         #[cfg(windows)]
         let submit_deadline = params
             .wait
@@ -179,20 +172,59 @@ impl App {
             .and_then(|wait| wait.submission_deadline);
         #[cfg(not(windows))]
         let submit_deadline = None;
+        let Some(agent) = self.agent_info(resolved.ws_idx, resolved.pane_id) else {
+            return Err(agent_not_found(id, &params.target));
+        };
+        let completion = match self.submit_text_to_agent(
+            resolved.ws_idx,
+            resolved.pane_id,
+            expected_agent,
+            &params.text,
+            submit_deadline,
+        ) {
+            Ok(completion) => completion,
+            Err(AgentSubmitError::NoRuntime) => return Err(agent_not_found(id, &params.target)),
+            Err(AgentSubmitError::NotForeground) => {
+                return Err(encode_error(
+                    id,
+                    "agent_not_ready",
+                    format!(
+                        "agent {} is no longer the pane foreground process",
+                        params.target
+                    ),
+                ));
+            }
+            Err(AgentSubmitError::Write(message)) => {
+                return Err(encode_error(id, "agent_prompt_failed", message));
+            }
+        };
+        Ok((id, agent, completion))
+    }
+
+    /// Writes text and Enter to the agent in a pane as one ordered submission.
+    pub(crate) fn submit_text_to_agent(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        expected_agent: crate::detect::Agent,
+        text: &str,
+        submit_deadline: Option<std::time::Instant>,
+    ) -> Result<std::sync::mpsc::Receiver<std::io::Result<()>>, AgentSubmitError> {
+        let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+            return Err(AgentSubmitError::NoRuntime);
+        };
+        if !super::super::agents::runtime_hosts_agent(runtime, expected_agent) {
+            return Err(AgentSubmitError::NotForeground);
+        }
         if expected_agent == crate::detect::Agent::GithubCopilot {
             // Copilot ignores synthetic Enter after focus loss until it receives focus gained.
-            let focus = match crate::ghostty::encode_focus(crate::ghostty::FocusEvent::Gained) {
-                Ok(focus) => focus,
-                Err(err) => {
-                    return Err(encode_error(id, "agent_prompt_failed", err.to_string()));
-                }
-            };
-            if let Err(err) = runtime.try_send_bytes(Bytes::from(focus)) {
-                return Err(encode_error(id, "agent_prompt_failed", err.to_string()));
-            }
+            let focus = crate::ghostty::encode_focus(crate::ghostty::FocusEvent::Gained)
+                .map_err(|err| AgentSubmitError::Write(err.to_string()))?;
+            runtime
+                .try_send_bytes(Bytes::from(focus))
+                .map_err(|err| AgentSubmitError::Write(err.to_string()))?;
         }
-        let (text, enter) =
-            crate::app::api_helpers::encode_api_submission_parts(runtime, &params.text);
+        let (text, enter) = crate::app::api_helpers::encode_api_submission_parts(runtime, text);
         #[cfg(windows)]
         let text = if expected_agent == crate::detect::Agent::Codex {
             let mut text = text;
@@ -201,18 +233,14 @@ impl App {
         } else {
             text
         };
-        let Some(agent) = self.agent_info(resolved.ws_idx, resolved.pane_id) else {
-            return Err(agent_not_found(id, &params.target));
-        };
-        let completion = runtime
+        runtime
             .queue_user_input_submission(
                 Bytes::from(text),
                 Bytes::from(enter),
                 AGENT_PROMPT_SUBMIT_DELAY,
                 submit_deadline,
             )
-            .map_err(|err| encode_error(id.clone(), "agent_prompt_failed", err.to_string()))?;
-        Ok((id, agent, completion))
+            .map_err(|err| AgentSubmitError::Write(err.to_string()))
     }
 
     pub(super) fn handle_agent_read(

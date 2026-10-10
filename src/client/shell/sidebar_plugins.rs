@@ -31,6 +31,7 @@ const INPUT_ECHO_POLL: Duration = Duration::from_millis(16);
 const PROGRAM_CHECK: Duration = Duration::from_millis(500);
 /// Start of the terminal title a plugin pane sets to name the row under a right-click.
 const MENU_TITLE_PREFIX: &str = "herdr-menu;";
+const MENU2_TITLE_PREFIX: &str = "herdr-menu2;";
 /// The pane token that holds a row label, and the metadata source it is reported under.
 pub(super) const LABEL_TOKEN: &str = "label";
 pub(super) const LABEL_TOKEN_SOURCE: &str = "tree";
@@ -152,25 +153,85 @@ pub(super) struct SidebarMenuRequest {
     pub(super) y: u16,
     /// The agent pane of the row and the label it has, when the row is one agent.
     pub(super) label_pane: Option<(String, String)>,
+    /// Key and text of each answer of the dialog that agent shows.
+    pub(super) answers: Vec<(String, String)>,
 }
 
-/// Reads `herdr-menu;<kind>;<id>;<count>;<agent pane>;<label>`. The last two parts are optional,
-/// and the label is the rest of the title.
-fn parse_menu_title(title: &str) -> Option<(SidebarMenuTarget, Option<(String, String)>)> {
+/// What a menu title names: the row, the agent pane with its label, and the answers.
+type MenuTitle = (
+    SidebarMenuTarget,
+    Option<(String, String)>,
+    Vec<(String, String)>,
+);
+
+fn menu_target(kind: &str, id: String) -> Option<SidebarMenuTarget> {
+    match kind {
+        "workspace" => Some(SidebarMenuTarget::Workspace(id)),
+        "tab" => Some(SidebarMenuTarget::Tab(id)),
+        "pane" => Some(SidebarMenuTarget::Pane(id)),
+        _ => None,
+    }
+}
+
+/// Reads `herdr-menu;<kind>;<id>;<count>;<agent pane>;<label>`, where the last two parts are
+/// optional and the label is the rest of the title, or `herdr-menu2;<JSON>`, which can also
+/// carry answers.
+fn parse_menu_title(title: &str) -> Option<MenuTitle> {
+    if let Some(json) = title.strip_prefix(MENU2_TITLE_PREFIX) {
+        return parse_menu2(json);
+    }
     let mut parts = title.strip_prefix(MENU_TITLE_PREFIX)?.splitn(5, ';');
     let (kind, id) = (parts.next()?, parts.next()?.to_owned());
-    let target = match kind {
-        "workspace" => SidebarMenuTarget::Workspace(id),
-        "tab" => SidebarMenuTarget::Tab(id),
-        "pane" => SidebarMenuTarget::Pane(id),
-        _ => return None,
-    };
+    let target = menu_target(kind, id)?;
     let _count = parts.next();
     let label_pane = parts
         .next()
         .filter(|pane| !pane.is_empty())
         .map(|pane| (pane.to_owned(), parts.next().unwrap_or_default().to_owned()));
-    Some((target, label_pane))
+    Some((target, label_pane, Vec::new()))
+}
+
+const MAX_MENU_ANSWERS: usize = 6;
+const MAX_ANSWER_CHARS: usize = 40;
+
+fn parse_menu2(json: &str) -> Option<MenuTitle> {
+    #[derive(serde::Deserialize)]
+    struct Answer {
+        key: String,
+        #[serde(default)]
+        text: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct Menu {
+        kind: String,
+        id: String,
+        #[serde(default)]
+        agent_pane: String,
+        #[serde(default)]
+        label: String,
+        #[serde(default)]
+        answers: Vec<Answer>,
+    }
+    let menu: Menu = serde_json::from_str(json).ok()?;
+    let target = menu_target(&menu.kind, menu.id)?;
+    let label_pane = (!menu.agent_pane.is_empty()).then_some((menu.agent_pane, menu.label));
+    // A plugin can only make the client press one digit. Any other key is left out.
+    let answers = menu
+        .answers
+        .into_iter()
+        .filter(|answer| matches!(answer.key.as_bytes(), [b'1'..=b'9']))
+        .take(MAX_MENU_ANSWERS)
+        .map(|answer| {
+            let text = answer
+                .text
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(MAX_ANSWER_CHARS)
+                .collect();
+            (answer.key, text)
+        })
+        .collect();
+    Some((target, label_pane, answers))
 }
 
 #[derive(Default)]
@@ -296,13 +357,15 @@ impl SidebarPlugins {
                 pane.title = title;
                 let waiting = menu_wait.filter(|(section, ..)| section.index() == index);
                 let target = pane.title.as_deref().and_then(parse_menu_title);
-                if let (Some((_, x, y, _)), Some((target, label_pane))) = (waiting, target) {
+                if let (Some((_, x, y, _)), Some((target, label_pane, answers))) = (waiting, target)
+                {
                     self.menu_wait.set(None);
                     self.menu_request = Some(SidebarMenuRequest {
                         target,
                         x,
                         y,
                         label_pane,
+                        answers,
                     });
                 }
             }
@@ -699,6 +762,7 @@ impl super::ClientShellState {
                 }
                 if let Some(super::ClientShellOverlay::ContextMenu(menu)) = self.overlay.as_mut() {
                     menu.label_pane = request.label_pane;
+                    menu.answers = request.answers;
                     repaint = true;
                 }
             }

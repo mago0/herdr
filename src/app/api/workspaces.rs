@@ -333,13 +333,15 @@ impl App {
                 (
                     self.public_workspace_id(*index),
                     self.workspace_info(*index),
+                    self.public_pane_ids_in(*index, None),
                 )
             })
             .collect::<Vec<_>>();
         self.state.selected = index;
         self.state.close_selected_workspace();
         self.shutdown_detached_terminal_runtimes();
-        for (workspace_id, workspace) in closed_workspaces {
+        for (workspace_id, workspace, closed_panes) in closed_workspaces {
+            self.emit_panes_closed(closed_panes);
             self.emit_event(EventEnvelope {
                 event: EventKind::WorkspaceClosed,
                 data: EventData::WorkspaceClosed {
@@ -378,6 +380,70 @@ mod tests {
         config::Config,
         workspace::Workspace,
     };
+
+    #[test]
+    fn workspace_close_reports_each_pane_before_the_workspace() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
+        let mut closing = Workspace::test_new("closing");
+        let first = closing.tabs[0].root_pane;
+        let tab_idx = closing.test_add_tab(None);
+        let second = closing.tabs[tab_idx].root_pane;
+        app.state.workspaces = vec![Workspace::test_new("kept"), closing];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let workspace_id = app.public_workspace_id(1);
+        let mut expected = vec![
+            app.public_pane_id(1, first).unwrap(),
+            app.public_pane_id(1, second).unwrap(),
+        ];
+        expected.sort();
+
+        let response = app.handle_workspace_close(
+            "req".into(),
+            WorkspaceCloseParams {
+                workspace_id: workspace_id.clone(),
+                close_group: false,
+            },
+        );
+
+        assert!(serde_json::from_str::<SuccessResponse>(&response).is_ok());
+        let events = event_hub.events_after(0);
+        assert_eq!(
+            events
+                .iter()
+                .map(|(_, event)| event.event)
+                .collect::<Vec<_>>(),
+            [
+                EventKind::PaneClosed,
+                EventKind::PaneClosed,
+                EventKind::WorkspaceClosed
+            ]
+        );
+        let mut closed = events
+            .iter()
+            .filter_map(|(_, event)| match &event.data {
+                EventData::PaneClosed {
+                    pane_id,
+                    workspace_id: closed_workspace_id,
+                } => {
+                    assert_eq!(closed_workspace_id, &workspace_id);
+                    Some(pane_id.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        closed.sort();
+        assert_eq!(closed, expected);
+    }
 
     // `new_cwd = follow` must anchor on the focused pane for every creation
     // surface. Splits and tabs already do; a new workspace must follow the
@@ -682,6 +748,15 @@ mod tests {
         assert!(app.state.terminal_runtime_shutdowns.is_empty());
         app.state.assert_invariants_for_test();
         let events = app.event_hub.events_after(0);
+        // Each workspace is reported after its panes.
+        assert!(matches!(
+            events.first().map(|(_, event)| event.event),
+            Some(EventKind::PaneClosed)
+        ));
+        let events = events
+            .into_iter()
+            .filter(|(_, event)| event.event != EventKind::PaneClosed)
+            .collect::<Vec<_>>();
         assert_eq!(events.len(), closed.len());
         for ((_, event), (workspace_id, workspace)) in events.iter().zip(closed) {
             assert!(matches!(event.event, EventKind::WorkspaceClosed));

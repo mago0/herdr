@@ -225,6 +225,7 @@ impl App {
             return tab_not_found(id, &target.tab_id);
         };
         let closes_workspace = ws.tabs.len() <= 1;
+        let closed_panes = self.public_pane_ids_in(ws_idx, Some(tab_idx));
         let terminal_ids = self.state.terminal_ids_for_tab(ws_idx, tab_idx);
         let pane_ids = ws
             .tabs
@@ -245,6 +246,7 @@ impl App {
             self.state.close_selected_workspace();
             self.state.remove_plugin_pane_records(pane_ids);
             self.shutdown_detached_terminal_runtimes();
+            self.emit_panes_closed(closed_panes);
             self.emit_event(EventEnvelope {
                 event: EventKind::TabClosed,
                 data: EventData::TabClosed {
@@ -276,6 +278,7 @@ impl App {
         self.state.remove_unattached_terminal_ids(terminal_ids);
         self.shutdown_detached_terminal_runtimes();
         self.schedule_session_save();
+        self.emit_panes_closed(closed_panes);
         self.emit_event(EventEnvelope {
             event: EventKind::TabClosed,
             data: EventData::TabClosed {
@@ -323,6 +326,69 @@ mod tests {
     };
 
     #[test]
+    fn api_tab_close_reports_each_pane_of_the_tab_before_the_tab() {
+        let event_hub = crate::api::EventHub::default();
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            event_hub.clone(),
+        );
+        let mut workspace = Workspace::test_new("tabs");
+        let kept = workspace.tabs[0].root_pane;
+        let tab_idx = workspace.test_add_tab(None);
+        workspace.active_tab = tab_idx;
+        let first = workspace.tabs[tab_idx].root_pane;
+        let second = workspace.test_split(ratatui::layout::Direction::Horizontal);
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let workspace_id = app.public_workspace_id(0);
+        let mut expected = vec![
+            app.public_pane_id(0, first).unwrap(),
+            app.public_pane_id(0, second).unwrap(),
+        ];
+        expected.sort();
+        let kept = app.public_pane_id(0, kept).unwrap();
+        let tab_id = app.public_tab_id(0, tab_idx).unwrap();
+
+        let response = app.handle_tab_close("req".into(), TabTarget { tab_id });
+
+        assert!(serde_json::from_str::<SuccessResponse>(&response).is_ok());
+        let events = event_hub.events_after(0);
+        assert_eq!(
+            events
+                .iter()
+                .map(|(_, event)| event.event)
+                .collect::<Vec<_>>(),
+            [
+                EventKind::PaneClosed,
+                EventKind::PaneClosed,
+                EventKind::TabClosed
+            ]
+        );
+        let mut closed = events
+            .iter()
+            .filter_map(|(_, event)| match &event.data {
+                EventData::PaneClosed {
+                    pane_id,
+                    workspace_id: closed_workspace_id,
+                } => {
+                    assert_eq!(closed_workspace_id, &workspace_id);
+                    Some(pane_id.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        closed.sort();
+        assert_eq!(closed, expected);
+        assert!(!closed.contains(&kept));
+    }
+
+    #[test]
     fn api_tab_close_last_tab_closes_workspace_and_emits_both_events() {
         let event_hub = crate::api::EventHub::default();
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -338,6 +404,8 @@ mod tests {
         app.state.selected = 0;
         let tab_id = app.public_tab_id(0, 0).unwrap();
         let workspace_id = app.public_workspace_id(0);
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let pane_id = app.public_pane_id(0, root).unwrap();
 
         let response = app.handle_tab_close(
             "req".into(),
@@ -356,8 +424,20 @@ mod tests {
                 .iter()
                 .map(|(_, event)| event.event)
                 .collect::<Vec<_>>(),
-            [EventKind::TabClosed, EventKind::WorkspaceClosed]
+            [
+                EventKind::PaneClosed,
+                EventKind::TabClosed,
+                EventKind::WorkspaceClosed
+            ]
         );
+        assert_eq!(
+            events[0].1.data,
+            EventData::PaneClosed {
+                pane_id: pane_id.clone(),
+                workspace_id: workspace_id.clone(),
+            }
+        );
+        let events = &events[1..];
         assert!(matches!(
             &events[0].1.data,
             EventData::TabClosed {

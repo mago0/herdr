@@ -91,6 +91,25 @@ pub struct EventsWaitParams {
     pub timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EventsReadParams {
+    /// Return events with a sequence number above this one. Without it, no events are returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<u64>,
+    /// Dotted event names to keep. Empty keeps all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SequencedEvent {
+    pub seq: u64,
+    #[serde(flatten)]
+    pub event: EventEnvelope,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneWaitForOutputParams {
     pub pane_id: String,
@@ -218,6 +237,9 @@ pub enum EventKind {
     PaneAgentDetected,
     PaneAgentStatusChanged,
     LayoutUpdated,
+    PaneDeliveryChanged,
+    PaneAgentStalled,
+    JobFinished,
 }
 
 impl EventKind {
@@ -249,11 +271,13 @@ impl EventKind {
             EventKind::PaneAgentDetected => "pane.agent_detected",
             EventKind::PaneAgentStatusChanged => "pane.agent_status_changed",
             EventKind::LayoutUpdated => "layout.updated",
+            EventKind::PaneDeliveryChanged => "pane.delivery_changed",
+            EventKind::PaneAgentStalled => "pane.agent_stalled",
+            EventKind::JobFinished => "job.finished",
         }
     }
 }
 
-#[cfg(test)]
 pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::WorkspaceCreated,
     EventKind::WorkspaceUpdated,
@@ -281,6 +305,9 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneAgentDetected,
     EventKind::PaneAgentStatusChanged,
     EventKind::LayoutUpdated,
+    EventKind::PaneDeliveryChanged,
+    EventKind::PaneAgentStalled,
+    EventKind::JobFinished,
 ];
 
 pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
@@ -306,7 +333,18 @@ pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneExited,
     EventKind::PaneAgentDetected,
     EventKind::PaneAgentStatusChanged,
+    EventKind::PaneDeliveryChanged,
+    EventKind::PaneAgentStalled,
 ];
+
+/// Every event name, for callers that filter history by name.
+pub fn known_event_names_for_read() -> Vec<&'static str> {
+    KNOWN_EVENT_KINDS
+        .iter()
+        .copied()
+        .map(EventKind::dot_name)
+        .collect()
+}
 
 #[cfg(test)]
 pub fn known_event_names() -> Vec<&'static str> {
@@ -549,8 +587,28 @@ pub enum EventData {
         display_agent: Option<String>,
         #[serde(default, skip_serializing_if = "HashMap::is_empty")]
         state_labels: HashMap<String, String>,
+        /// What the agent waits for, when the status is blocked and the reason is known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocker: Option<String>,
     },
     LayoutUpdated {
         layout: super::panes::PaneLayoutSnapshot,
+    },
+    PaneDeliveryChanged {
+        pane_id: String,
+        workspace_id: String,
+        pending: u32,
+    },
+    PaneAgentStalled {
+        pane_id: String,
+        workspace_id: String,
+        stalled: bool,
+        quiet_secs: u64,
+    },
+    JobFinished {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit: Option<i32>,
+        news: bool,
     },
 }

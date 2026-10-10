@@ -205,6 +205,13 @@ pub enum AppEvent {
         stderr: String,
         error: Option<String>,
     },
+    /// A run of a server job ended.
+    JobFinished {
+        name: String,
+        run_id: u64,
+        exit_code: Option<i32>,
+        stdout: String,
+    },
     /// Background `git worktree add` completed.
     WorktreeAddFinished(Box<WorktreeAddResult>),
     /// Background `git worktree remove` completed.

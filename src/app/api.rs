@@ -133,6 +133,17 @@ impl App {
             return Vec::new();
         }
 
+        if let AppEvent::JobFinished {
+            name,
+            run_id,
+            exit_code,
+            stdout,
+        } = ev
+        {
+            self.handle_job_finished(&name, run_id, exit_code, &stdout);
+            return Vec::new();
+        }
+
         if let AppEvent::PluginCommandFinished {
             log_id,
             finished_unix_ms,
@@ -688,6 +699,12 @@ impl App {
             || update.previous_presentation != update.presentation
         {
             let presentation = update.presentation.clone();
+            let blocker = self.note_agent_state_change(
+                update.ws_idx,
+                update.pane_id,
+                update.previous_state,
+                update.state,
+            );
             self.emit_event(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::PaneAgentStatusChanged,
                 data: crate::api::schema::EventData::PaneAgentStatusChanged {
@@ -698,6 +715,7 @@ impl App {
                     title: presentation.title,
                     display_agent: presentation.display_agent,
                     state_labels: presentation.state_labels,
+                    blocker,
                 },
             });
         }
@@ -760,7 +778,45 @@ impl App {
 
     pub(super) fn emit_event(&mut self, event: crate::api::schema::EventEnvelope) {
         self.run_plugin_event_hooks(&event);
+        self.run_jobs_for_event(&event);
         self.event_hub.push(event);
+    }
+
+    /// Public ids of the panes of one tab, or of a whole workspace, with the workspace id.
+    /// Read before a close, because a closed pane has no public id.
+    pub(crate) fn public_pane_ids_in(
+        &self,
+        ws_idx: usize,
+        tab_idx: Option<usize>,
+    ) -> Vec<(String, String)> {
+        let Some(ws) = self.state.workspaces.get(ws_idx) else {
+            return Vec::new();
+        };
+        let workspace_id = self.public_workspace_id(ws_idx);
+        let mut panes: Vec<(String, String)> = ws
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| tab_idx.is_none_or(|only| only == *idx))
+            .flat_map(|(_, tab)| tab.layout.pane_ids())
+            .filter_map(|pane_id| self.public_pane_id(ws_idx, pane_id))
+            .map(|pane_id| (pane_id, workspace_id.clone()))
+            .collect();
+        panes.sort();
+        panes
+    }
+
+    /// Reports panes that went away with their tab or workspace.
+    pub(crate) fn emit_panes_closed(&mut self, panes: Vec<(String, String)>) {
+        for (pane_id, workspace_id) in panes {
+            self.emit_event(crate::api::schema::EventEnvelope {
+                event: crate::api::schema::EventKind::PaneClosed,
+                data: crate::api::schema::EventData::PaneClosed {
+                    pane_id,
+                    workspace_id,
+                },
+            });
+        }
     }
 
     pub(crate) fn emit_pane_updated(&mut self, ws_idx: usize, pane_id: crate::layout::PaneId) {
@@ -1160,6 +1216,20 @@ impl App {
             }
             Method::PaneReportMetadata(params) => {
                 return self.handle_pane_report_metadata(request.id, params);
+            }
+            Method::PaneSupervise(params) => {
+                return self.handle_pane_supervise(request.id, params);
+            }
+            Method::JobAdd(params) => return self.handle_job_add(request.id, params),
+            Method::JobList(_) => return self.handle_job_list(request.id),
+            Method::JobRemove(params) => return self.handle_job_remove(request.id, params),
+            Method::JobRun(params) => return self.handle_job_run(request.id, params),
+            Method::AgentDeliver(params) => return self.handle_agent_deliver(request.id, params),
+            Method::AgentDeliveries(params) => {
+                return self.handle_agent_deliveries(request.id, params);
+            }
+            Method::AgentCancelDelivery(params) => {
+                return self.handle_agent_cancel_delivery(request.id, params);
             }
             Method::PaneClearAgentAuthority(params) => {
                 return self.handle_pane_clear_agent_authority(request.id, params);

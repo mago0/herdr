@@ -1,0 +1,855 @@
+use std::time::{Duration, Instant};
+
+use bytes::Bytes;
+
+use super::*;
+use crate::api::schema::{ErrorResponse, SuccessResponse};
+use crate::app::Mode;
+use crate::config::Config;
+use crate::detect::Agent;
+use crate::events::AppEvent;
+use crate::layout::PaneId;
+use crate::workspace::Workspace;
+
+/// Two workspaces with one agent pane each: a supervisor in the first, a worker in the second.
+struct Fixture {
+    app: App,
+    supervisor: PaneId,
+    worker: PaneId,
+    supervisor_rx: tokio::sync::mpsc::Receiver<Bytes>,
+    worker_rx: tokio::sync::mpsc::Receiver<Bytes>,
+}
+
+fn fixture() -> Fixture {
+    let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(
+        &Config::default(),
+        crate::app::AppPolicy::TEST,
+        None,
+        api_rx,
+        crate::api::EventHub::default(),
+    );
+    app.state.workspaces = vec![Workspace::test_new("lead"), Workspace::test_new("work")];
+    app.state.ensure_test_terminals();
+    app.state.active = Some(0);
+    app.state.selected = 0;
+    app.state.mode = Mode::Terminal;
+    let supervisor = app.state.workspaces[0].tabs[0].root_pane;
+    let worker = app.state.workspaces[1].tabs[0].root_pane;
+    let (supervisor_runtime, supervisor_rx) =
+        crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+    let (worker_runtime, worker_rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+    app.state
+        .insert_test_runtime(supervisor, supervisor_runtime);
+    app.state.insert_test_runtime(worker, worker_runtime);
+    let mut fixture = Fixture {
+        app,
+        supervisor,
+        worker,
+        supervisor_rx,
+        worker_rx,
+    };
+    fixture.set_agent(0, supervisor, "lead", AgentState::Idle);
+    fixture.set_agent(1, worker, "worker", AgentState::Idle);
+    fixture
+}
+
+impl Fixture {
+    fn terminal(&self, ws_idx: usize, pane: PaneId) -> TerminalId {
+        self.app.state.workspaces[ws_idx]
+            .terminal_id(pane)
+            .cloned()
+            .unwrap()
+    }
+
+    fn set_agent(&mut self, ws_idx: usize, pane: PaneId, name: &str, state: AgentState) {
+        let terminal = self.terminal(ws_idx, pane);
+        let terminal = self.app.state.terminals.get_mut(&terminal).unwrap();
+        terminal.set_agent_name(name.into());
+        terminal.set_detected_state(Some(Agent::Claude), state);
+    }
+
+    /// Moves the worker's agent to a state the way the screen detector does.
+    fn worker_state(&mut self, state: AgentState) {
+        self.app.handle_internal_event(AppEvent::StateChanged {
+            pane_id: self.worker,
+            agent: Some(Agent::Claude),
+            state,
+            visible_blocker: state == AgentState::Blocked,
+            visible_working: state == AgentState::Working,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+    }
+
+    fn tick(&mut self) {
+        self.app.orchestration.wake();
+        self.app.run_orchestration_tick(Instant::now());
+    }
+
+    fn deliver(&mut self, target: &str, text: &str) -> DeliveryInfo {
+        let response = self.app.handle_agent_deliver(
+            "req".into(),
+            AgentDeliverParams {
+                target: target.into(),
+                text: text.into(),
+                source: None,
+                ttl_ms: None,
+            },
+        );
+        match serde_json::from_str::<SuccessResponse>(&response)
+            .unwrap_or_else(|_| panic!("deliver failed: {response}"))
+            .result
+        {
+            ResponseResult::Delivery { delivery } => delivery,
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    fn supervise(&mut self, report: Vec<SuperviseReport>) {
+        let response = self.app.handle_pane_supervise(
+            "req".into(),
+            PaneSuperviseParams {
+                pane_id: "worker".into(),
+                supervisor: Some("lead".into()),
+                report,
+            },
+        );
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+            "{response}"
+        );
+    }
+
+    fn agent(&self, ws_idx: usize, pane: PaneId) -> crate::api::schema::AgentInfo {
+        self.app.agent_info(ws_idx, pane).unwrap()
+    }
+}
+
+/// Everything typed into a pane, as text. The writer runs beside the test, and a submission gets
+/// its Enter a moment after its text, so this waits a short time for both.
+async fn typed(rx: &mut tokio::sync::mpsc::Receiver<Bytes>) -> String {
+    let mut bytes = Vec::new();
+    if let Ok(Some(chunk)) = tokio::time::timeout(Duration::from_millis(400), rx.recv()).await {
+        bytes.extend_from_slice(&chunk);
+    }
+    while !bytes.is_empty() && !bytes.ends_with(b"\r") {
+        match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+            Ok(Some(chunk)) => bytes.extend_from_slice(&chunk),
+            _ => break,
+        }
+    }
+    while let Ok(chunk) = rx.try_recv() {
+        bytes.extend_from_slice(&chunk);
+    }
+    // The writer reports completion just after the Enter is handed over.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn unique_suffix() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0)
+}
+
+fn error_code(response: &str) -> String {
+    serde_json::from_str::<ErrorResponse>(response)
+        .unwrap_or_else(|_| panic!("expected an error: {response}"))
+        .error
+        .code
+}
+
+#[tokio::test]
+async fn a_delivery_to_a_pane_that_is_not_focused_is_typed_at_once() {
+    let mut f = fixture();
+    let delivery = f.deliver("worker", "MAIL|1|status");
+    assert_eq!(delivery.state, DeliveryState::Delivered);
+    assert_eq!(typed(&mut f.worker_rx).await, "MAIL|1|status\r");
+    f.tick();
+    assert_eq!(f.agent(1, f.worker).pending_deliveries, None);
+}
+
+#[tokio::test]
+async fn a_delivery_to_the_focused_pane_waits_until_focus_moves_away() {
+    let mut f = fixture();
+    let delivery = f.deliver("lead", "MAIL|1|question");
+    assert_eq!(delivery.state, DeliveryState::Queued);
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "");
+    assert_eq!(f.agent(0, f.supervisor).pending_deliveries, Some(1));
+
+    f.app.state.active = Some(1);
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "MAIL|1|question\r");
+}
+
+#[tokio::test]
+async fn focus_does_not_hold_a_delivery_when_no_client_is_attached() {
+    let mut f = fixture();
+    f.app.orchestration.client_attached = false;
+    assert_eq!(f.deliver("lead", "wake").state, DeliveryState::Delivered);
+    assert_eq!(typed(&mut f.supervisor_rx).await, "wake\r");
+}
+
+#[tokio::test]
+async fn a_delivery_to_a_blocked_agent_waits_until_it_is_not_blocked() {
+    let mut f = fixture();
+    f.worker_state(AgentState::Blocked);
+    assert_eq!(f.deliver("worker", "continue").state, DeliveryState::Queued);
+    f.tick();
+    assert_eq!(typed(&mut f.worker_rx).await, "");
+
+    f.worker_state(AgentState::Working);
+    f.app.run_orchestration_tick(Instant::now());
+    assert_eq!(typed(&mut f.worker_rx).await, "continue\r");
+}
+
+#[tokio::test]
+async fn deliveries_to_one_pane_are_typed_one_at_a_time_in_order() {
+    let mut f = fixture();
+    f.worker_state(AgentState::Blocked);
+    f.deliver("worker", "first");
+    f.deliver("worker", "second");
+    f.worker_state(AgentState::Idle);
+
+    f.tick();
+    assert_eq!(typed(&mut f.worker_rx).await, "first\r");
+    f.tick();
+    assert_eq!(typed(&mut f.worker_rx).await, "second\r");
+    f.tick();
+    assert_eq!(typed(&mut f.worker_rx).await, "");
+    assert_eq!(f.agent(1, f.worker).pending_deliveries, None);
+}
+
+#[tokio::test]
+async fn a_delivery_waits_in_a_pane_that_has_no_agent() {
+    let mut f = fixture();
+    let terminal = f.terminal(1, f.worker);
+    let pane_id = f.app.public_pane_id(1, f.worker).unwrap();
+    *f.app.state.terminals.get_mut(&terminal).unwrap() =
+        crate::terminal::TerminalState::new(terminal.clone(), "/".into());
+
+    assert_eq!(f.deliver(&pane_id, "hello").state, DeliveryState::Queued);
+    f.tick();
+    assert_eq!(typed(&mut f.worker_rx).await, "");
+}
+
+#[tokio::test]
+async fn deliveries_of_a_closed_pane_are_dropped() {
+    let mut f = fixture();
+    f.deliver("lead", "held");
+    f.app.state.workspaces.remove(0);
+    f.app.state.active = Some(0);
+    f.tick();
+    assert_eq!(f.app.orchestration.deliveries.iter().count(), 0);
+}
+
+#[tokio::test]
+async fn a_queued_delivery_can_be_listed_and_cancelled() {
+    let mut f = fixture();
+    let delivery = f.deliver("lead", "held");
+    let listed = f.app.handle_agent_deliveries(
+        "req".into(),
+        AgentDeliveriesParams {
+            target: Some("lead".into()),
+        },
+    );
+    let ResponseResult::DeliveryList { deliveries } =
+        serde_json::from_str::<SuccessResponse>(&listed)
+            .unwrap()
+            .result
+    else {
+        panic!("{listed}");
+    };
+    assert_eq!(deliveries, vec![delivery.clone()]);
+
+    let cancel = |f: &mut Fixture| {
+        f.app.handle_agent_cancel_delivery(
+            "req".into(),
+            AgentCancelDeliveryParams {
+                delivery_id: delivery.delivery_id.clone(),
+            },
+        )
+    };
+    assert!(serde_json::from_str::<SuccessResponse>(&cancel(&mut f)).is_ok());
+    assert_eq!(error_code(&cancel(&mut f)), "delivery_not_found");
+    f.app.state.active = Some(1);
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "");
+}
+
+#[tokio::test]
+async fn empty_and_unknown_deliveries_are_refused() {
+    let mut f = fixture();
+    let deliver = |f: &mut Fixture, target: &str, text: &str| {
+        f.app.handle_agent_deliver(
+            "req".into(),
+            AgentDeliverParams {
+                target: target.into(),
+                text: text.into(),
+                source: None,
+                ttl_ms: None,
+            },
+        )
+    };
+    assert_eq!(
+        error_code(&deliver(&mut f, "worker", "  \n")),
+        "empty_delivery"
+    );
+    assert_eq!(
+        error_code(&deliver(&mut f, "nobody", "hi")),
+        "pane_not_found"
+    );
+    assert_eq!(
+        error_code(&deliver(
+            &mut f,
+            "worker",
+            &"x".repeat(MAX_DELIVERY_BYTES + 1)
+        )),
+        "delivery_too_large"
+    );
+}
+
+#[tokio::test]
+async fn a_supervisor_is_told_once_when_its_worker_blocks_with_what_the_worker_shows() {
+    let mut f = fixture();
+    f.app.state.active = Some(1);
+    f.supervise(vec![SuperviseReport::Blocked]);
+    let worker_pane = f.app.public_pane_id(1, f.worker).unwrap();
+    f.app
+        .lookup_runtime_sender(1, f.worker)
+        .unwrap()
+        .test_process_pty_bytes(b"Do you want to run this command?\r\n  1. Yes\r\n  2. No\r\n");
+
+    f.worker_state(AgentState::Blocked);
+    f.tick();
+    assert_eq!(
+        typed(&mut f.supervisor_rx).await,
+        format!(
+            "HERDR|blocked|worker|{worker_pane}|Do you want to run this command? / 1. Yes / 2. No\r"
+        )
+    );
+    assert_eq!(
+        f.agent(1, f.worker).blocker.as_deref(),
+        Some("Do you want to run this command? / 1. Yes / 2. No")
+    );
+
+    f.worker_state(AgentState::Blocked);
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "");
+
+    f.worker_state(AgentState::Working);
+    assert_eq!(f.agent(1, f.worker).blocker, None);
+}
+
+#[tokio::test]
+async fn a_worker_that_is_blocked_when_the_link_is_made_is_reported_at_once() {
+    let mut f = fixture();
+    f.app.state.active = Some(1);
+    let worker_pane = f.app.public_pane_id(1, f.worker).unwrap();
+    f.app
+        .lookup_runtime_sender(1, f.worker)
+        .unwrap()
+        .test_process_pty_bytes(b"Trust this folder?\r\n  1. Yes\r\n  2. No\r\n");
+    f.worker_state(AgentState::Blocked);
+    assert_eq!(typed(&mut f.supervisor_rx).await, "");
+
+    f.supervise(vec![SuperviseReport::Blocked]);
+    assert_eq!(
+        typed(&mut f.supervisor_rx).await,
+        format!("HERDR|blocked|worker|{worker_pane}|Trust this folder? / 1. Yes / 2. No\r")
+    );
+    // Setting the same link again is not a new block.
+    f.tick();
+    f.supervise(vec![SuperviseReport::Blocked]);
+    assert_eq!(typed(&mut f.supervisor_rx).await, "");
+}
+
+#[tokio::test]
+async fn a_blocked_worker_is_not_reported_when_the_link_does_not_ask_for_it() {
+    let mut f = fixture();
+    f.app.state.active = Some(1);
+    f.supervise(vec![SuperviseReport::Exited]);
+    f.worker_state(AgentState::Blocked);
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "");
+}
+
+#[tokio::test]
+async fn a_supervisor_is_told_when_the_pane_of_its_worker_closes() {
+    let mut f = fixture();
+    f.app.state.active = Some(1);
+    f.supervise(vec![SuperviseReport::Exited]);
+    let worker_pane = f.app.public_pane_id(1, f.worker).unwrap();
+    f.tick();
+
+    f.app.state.workspaces.remove(1);
+    f.app.state.active = None;
+    f.tick();
+    assert_eq!(
+        typed(&mut f.supervisor_rx).await,
+        format!("HERDR|exited|worker|{worker_pane}\r")
+    );
+    assert!(f.app.orchestration.links.is_empty());
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "");
+}
+
+#[tokio::test]
+async fn a_supervisor_is_told_once_when_the_agent_of_its_worker_leaves_the_pane() {
+    let mut f = fixture();
+    f.app.state.active = Some(1);
+    f.supervise(vec![SuperviseReport::Exited]);
+    let worker_pane = f.app.public_pane_id(1, f.worker).unwrap();
+    f.tick();
+
+    let terminal = f.terminal(1, f.worker);
+    *f.app.state.terminals.get_mut(&terminal).unwrap() =
+        crate::terminal::TerminalState::new(terminal.clone(), "/".into());
+    f.tick();
+    assert_eq!(
+        typed(&mut f.supervisor_rx).await,
+        format!("HERDR|exited|worker|{worker_pane}\r")
+    );
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "");
+    assert_eq!(f.app.orchestration.links.len(), 1);
+}
+
+#[tokio::test]
+async fn a_link_shows_on_the_agent_and_can_be_cleared() {
+    let mut f = fixture();
+    f.supervise(Vec::new());
+    assert_eq!(
+        f.agent(1, f.worker).supervisor_pane_id,
+        f.app.public_pane_id(0, f.supervisor)
+    );
+    assert_eq!(f.agent(0, f.supervisor).supervisor_pane_id, None);
+
+    let response = f.app.handle_pane_supervise(
+        "req".into(),
+        PaneSuperviseParams {
+            pane_id: "worker".into(),
+            supervisor: None,
+            report: Vec::new(),
+        },
+    );
+    assert!(serde_json::from_str::<SuccessResponse>(&response).is_ok());
+    assert_eq!(f.agent(1, f.worker).supervisor_pane_id, None);
+}
+
+#[tokio::test]
+async fn a_link_that_closes_a_loop_or_names_a_missing_pane_is_refused() {
+    let mut f = fixture();
+    f.supervise(Vec::new());
+    let supervise = |f: &mut Fixture, pane: &str, by: &str| {
+        f.app.handle_pane_supervise(
+            "req".into(),
+            PaneSuperviseParams {
+                pane_id: pane.into(),
+                supervisor: Some(by.into()),
+                report: Vec::new(),
+            },
+        )
+    };
+    assert_eq!(
+        error_code(&supervise(&mut f, "lead", "worker")),
+        "supervision_cycle"
+    );
+    assert_eq!(
+        error_code(&supervise(&mut f, "lead", "lead")),
+        "supervision_cycle"
+    );
+    assert_eq!(
+        error_code(&supervise(&mut f, "lead", "nobody")),
+        "pane_not_found"
+    );
+    assert_eq!(
+        error_code(&supervise(&mut f, "nobody", "lead")),
+        "pane_not_found"
+    );
+}
+
+#[tokio::test]
+async fn a_link_is_dropped_when_the_supervisor_pane_closes() {
+    let mut f = fixture();
+    f.supervise(vec![SuperviseReport::Blocked]);
+    f.app.state.workspaces.remove(0);
+    f.app.state.active = Some(0);
+    f.tick();
+    assert!(f.app.orchestration.links.is_empty());
+}
+
+#[tokio::test]
+async fn a_working_agent_with_a_still_screen_is_marked_stalled_and_reported() {
+    let mut f = fixture();
+    f.app.state.active = Some(1);
+    f.supervise(vec![SuperviseReport::Stalled]);
+    f.app.orchestration.stall_after = Some(Duration::from_secs(600));
+    let worker_pane = f.app.public_pane_id(1, f.worker).unwrap();
+    f.worker_state(AgentState::Working);
+
+    let start = Instant::now();
+    f.app.orchestration.wake();
+    f.app.run_orchestration_tick(start);
+    assert_eq!(f.agent(1, f.worker).stalled_secs, None);
+
+    f.app.orchestration.wake();
+    f.app
+        .run_orchestration_tick(start + Duration::from_secs(600));
+    f.tick();
+    assert_eq!(
+        typed(&mut f.supervisor_rx).await,
+        format!("HERDR|stalled|worker|{worker_pane}|600\r")
+    );
+    let stalled = f
+        .app
+        .event_hub
+        .events_after(0)
+        .into_iter()
+        .filter_map(|(_, event)| match event.data {
+            EventData::PaneAgentStalled {
+                stalled,
+                quiet_secs,
+                ..
+            } => Some((stalled, quiet_secs)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(stalled, vec![(true, 600)]);
+
+    f.app
+        .lookup_runtime_sender(1, f.worker)
+        .unwrap()
+        .test_process_pty_bytes(b"progress\r\n");
+    f.app.orchestration.wake();
+    f.app
+        .run_orchestration_tick(start + Duration::from_secs(601));
+    assert_eq!(f.agent(1, f.worker).stalled_secs, None);
+}
+
+#[tokio::test]
+async fn queued_deliveries_and_links_come_back_from_the_state_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-orchestration-app-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let path = dir.join(store::STORE_FILE);
+    let mut f = fixture();
+    f.app.orchestration = Orchestration::new(Some(path.clone()), 600);
+    f.supervise(vec![SuperviseReport::Blocked, SuperviseReport::Exited]);
+    f.deliver("lead", "held while focused");
+    assert!(path.exists());
+
+    f.app.orchestration = Orchestration::new(Some(path.clone()), 600);
+    f.app.ensure_orchestration_loaded();
+    assert_eq!(f.agent(0, f.supervisor).pending_deliveries, Some(1));
+    assert_eq!(
+        f.agent(1, f.worker).supervisor_pane_id,
+        f.app.public_pane_id(0, f.supervisor)
+    );
+    let link = &f.app.orchestration.links[&f.terminal(1, f.worker)];
+    assert_eq!(
+        link.report,
+        vec![SuperviseReport::Blocked, SuperviseReport::Exited]
+    );
+
+    f.app.state.active = Some(1);
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "held while focused\r");
+    f.tick();
+    assert!(
+        store::load(&path).deliveries.is_empty(),
+        "a delivery that was typed must not be typed again after a restart"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+fn job(name: &str, script: &str) -> JobAddParams {
+    JobAddParams {
+        name: name.into(),
+        command: vec!["sh".into(), "-c".into(), script.into()],
+        cwd: None,
+        env: Default::default(),
+        every_ms: Some(60_000),
+        on_events: Vec::new(),
+        on_path: None,
+        target: Some("worker".into()),
+        owner_pane_id: None,
+        timeout_ms: None,
+        until_ms: None,
+        dedupe: None,
+    }
+}
+
+impl Fixture {
+    fn add_job(&mut self, params: JobAddParams) -> JobInfo {
+        let response = self.app.handle_job_add("req".into(), params);
+        match serde_json::from_str::<SuccessResponse>(&response)
+            .unwrap_or_else(|_| panic!("job add failed: {response}"))
+            .result
+        {
+            ResponseResult::JobInfo { job } => job,
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    fn job_info(&self, name: &str) -> JobInfo {
+        self.app
+            .job_info(self.app.orchestration.jobs.get(name).unwrap())
+    }
+
+    /// Runs ticks until the job has ended `runs` runs.
+    async fn wait_for_runs(&mut self, name: &str, runs: u64) {
+        for _ in 0..200 {
+            self.app.drain_all_internal_events();
+            if self.job_info(name).runs >= runs {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!(
+            "job {name} did not reach {runs} runs: {:?}",
+            self.job_info(name)
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_runs_at_once_and_its_output_is_delivered_to_its_target() {
+    let mut f = fixture();
+    let added = f.add_job(job("pr-watch", "echo \"PR 12 is red\""));
+    assert_eq!(added.target_pane_id, f.app.public_pane_id(1, f.worker));
+    assert_eq!(
+        (added.runs, added.dedupe, added.timeout_ms),
+        (0, true, 60_000)
+    );
+
+    f.tick();
+    f.wait_for_runs("pr-watch", 1).await;
+    assert_eq!(typed(&mut f.worker_rx).await, "PR 12 is red\r");
+    let info = f.job_info("pr-watch");
+    assert_eq!(info.last_exit, Some(0));
+    assert_eq!(info.last_news.as_deref(), Some("PR 12 is red"));
+    assert!(!info.running);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_that_exits_non_zero_delivers_nothing() {
+    let mut f = fixture();
+    f.add_job(job("quiet", "echo nothing new; exit 1"));
+    f.tick();
+    f.wait_for_runs("quiet", 1).await;
+    assert_eq!(typed(&mut f.worker_rx).await, "");
+    assert_eq!(f.job_info("quiet").last_exit, Some(1));
+    assert_eq!(f.job_info("quiet").last_news, None);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_runs_on_an_event_and_gets_its_name_and_data() {
+    let mut f = fixture();
+    f.app.state.active = Some(1);
+    f.add_job(JobAddParams {
+        every_ms: None,
+        on_events: vec!["pane.agent_status_changed".into()],
+        target: Some("lead".into()),
+        ..job(
+            "on-status",
+            "echo \"$HERDR_JOB_NAME $HERDR_JOB_EVENT $HERDR_JOB_TARGET_PANE_ID\"; \
+             test -n \"$HERDR_JOB_EVENT_JSON\"",
+        )
+    });
+    f.tick();
+    assert_eq!(f.job_info("on-status").runs, 0);
+
+    f.worker_state(AgentState::Working);
+    f.wait_for_runs("on-status", 1).await;
+    let lead_pane = f.app.public_pane_id(0, f.supervisor).unwrap();
+    assert_eq!(
+        typed(&mut f.supervisor_rx).await,
+        format!("on-status pane.agent_status_changed {lead_pane}\r")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_runs_when_its_file_changes() {
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-orchestration-path-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("proposals.json");
+    std::fs::write(&file, "[]").unwrap();
+    let mut f = fixture();
+    f.add_job(JobAddParams {
+        every_ms: None,
+        on_path: Some(file.display().to_string()),
+        ..job("on-file", &format!("cat {}", file.display()))
+    });
+    f.tick();
+    f.tick();
+    assert_eq!(f.job_info("on-file").runs, 0);
+
+    std::fs::write(&file, "[\"warranted\"]").unwrap();
+    f.tick();
+    f.wait_for_runs("on-file", 1).await;
+    assert_eq!(typed(&mut f.worker_rx).await, "[\"warranted\"]\r");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_past_its_time_limit_is_stopped_and_has_no_news() {
+    let mut f = fixture();
+    f.add_job(JobAddParams {
+        timeout_ms: Some(1_000),
+        ..job("slow", "echo early; sleep 30")
+    });
+    f.tick();
+    f.wait_for_runs("slow", 1).await;
+    assert_eq!(f.job_info("slow").last_exit, None);
+    assert_eq!(typed(&mut f.worker_rx).await, "");
+}
+
+#[tokio::test]
+async fn a_job_is_removed_when_its_owner_or_target_pane_closes() {
+    let mut f = fixture();
+    let owner = f.app.public_pane_id(1, f.worker).unwrap();
+    f.add_job(JobAddParams {
+        every_ms: None,
+        on_events: vec!["pane.closed".into()],
+        target: Some("lead".into()),
+        owner_pane_id: Some(owner),
+        ..job("owned", "true")
+    });
+    f.app.state.workspaces.remove(1);
+    f.tick();
+    assert_eq!(f.app.orchestration.jobs.len(), 0);
+}
+
+#[tokio::test]
+async fn a_job_with_the_same_name_replaces_the_first_and_a_bad_request_is_refused() {
+    let mut f = fixture();
+    let event_job = |script: &str| JobAddParams {
+        every_ms: None,
+        on_events: vec!["pane.closed".into()],
+        ..job("watch", script)
+    };
+    f.add_job(event_job("echo one"));
+    let second = f.add_job(event_job("echo two"));
+    assert_eq!(second.command[2], "echo two");
+    assert_eq!(f.app.orchestration.jobs.len(), 1);
+
+    let missing_target = f.app.handle_job_add(
+        "req".into(),
+        JobAddParams {
+            target: Some("nobody".into()),
+            ..event_job("true")
+        },
+    );
+    assert_eq!(error_code(&missing_target), "pane_not_found");
+    let no_trigger = f.app.handle_job_add(
+        "req".into(),
+        JobAddParams {
+            on_events: Vec::new(),
+            ..event_job("true")
+        },
+    );
+    assert_eq!(error_code(&no_trigger), "invalid_job_trigger");
+
+    let remove = |f: &mut Fixture| {
+        f.app.handle_job_remove(
+            "req".into(),
+            JobTarget {
+                name: "watch".into(),
+            },
+        )
+    };
+    assert!(serde_json::from_str::<SuccessResponse>(&remove(&mut f)).is_ok());
+    assert_eq!(error_code(&remove(&mut f)), "job_not_found");
+}
+
+#[tokio::test]
+async fn jobs_come_back_from_the_state_file_with_their_last_news() {
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-orchestration-jobs-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let path = dir.join(store::STORE_FILE);
+    let mut f = fixture();
+    f.app.orchestration = Orchestration::new(Some(path.clone()), 600);
+    f.add_job(JobAddParams {
+        every_ms: None,
+        on_events: vec!["pane.closed".into()],
+        ..job("kept", "echo red")
+    });
+    let run = f.app.orchestration.jobs.begin("kept", None).unwrap();
+    f.app
+        .handle_job_finished("kept", run.run_id, Some(0), "red\n");
+
+    f.app.orchestration = Orchestration::new(Some(path), 600);
+    f.app.ensure_orchestration_loaded();
+    let info = f.job_info("kept");
+    assert_eq!(info.on_events, vec!["pane.closed".to_string()]);
+    assert_eq!(info.target_pane_id, f.app.public_pane_id(1, f.worker));
+    assert_eq!(info.last_news.as_deref(), Some("red"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn pane_tokens_without_a_time_limit_come_back_from_the_state_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-orchestration-tokens-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let path = dir.join(store::STORE_FILE);
+    let mut f = fixture();
+    f.app.orchestration = Orchestration::new(Some(path.clone()), 600);
+    let worker_pane = f.app.public_pane_id(1, f.worker).unwrap();
+    let report = |f: &mut Fixture, key: &str, value: &str, ttl_ms: Option<u64>| {
+        let request = serde_json::json!({
+            "id": "req",
+            "method": "pane.report_metadata",
+            "params": {
+                "pane_id": worker_pane,
+                "source": "tree",
+                "tokens": { key: value },
+                "ttl_ms": ttl_ms,
+            },
+        });
+        let response = f
+            .app
+            .handle_api_request(serde_json::from_value(request).unwrap());
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+            "{response}"
+        );
+    };
+    report(&mut f, "label", "SRE-194", None);
+    report(&mut f, "progress", "3/5", Some(60_000));
+    f.tick();
+
+    let terminal = f.terminal(1, f.worker);
+    f.app
+        .state
+        .terminals
+        .get_mut(&terminal)
+        .unwrap()
+        .metadata_tokens = Default::default();
+    f.app.orchestration = Orchestration::new(Some(path), 600);
+    f.app.ensure_orchestration_loaded();
+    let tokens = f.agent(1, f.worker).tokens;
+    assert_eq!(tokens.get("label").map(String::as_str), Some("SRE-194"));
+    assert_eq!(tokens.get("progress"), None);
+    let _ = std::fs::remove_dir_all(dir);
+}

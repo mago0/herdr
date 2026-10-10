@@ -88,6 +88,15 @@ impl MetadataTokens {
             .collect()
     }
 
+    /// Values that have no time limit, which are the ones worth keeping across a restart.
+    pub(crate) fn lasting_values(&self) -> std::collections::BTreeMap<String, String> {
+        self.entries
+            .iter()
+            .filter(|(_, token)| token.expires_at.is_none())
+            .map(|(key, token)| (key.clone(), token.value.clone()))
+            .collect()
+    }
+
     pub(crate) fn next_expiry(&self) -> Option<Instant> {
         self.entries
             .values()

@@ -26,6 +26,9 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "wait" => agent_wait(&args[1..]),
         "attach" => agent_attach(&args[1..]),
         "start" => agent_start(&args[1..]),
+        "deliver" => super::orchestration::agent_deliver(&args[1..]),
+        "deliveries" => super::orchestration::agent_deliveries(&args[1..]),
+        "cancel-delivery" => super::orchestration::agent_cancel_delivery(&args[1..]),
         "explain" => agent_explain(&args[1..]),
         "help" | "--help" | "-h" => {
             print_agent_help();
@@ -298,9 +301,14 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
     let mut kind = None;
     let mut pane_id = None;
     let mut timeout_ms = None;
+    let mut link_supervisor = true;
     let mut index = 1;
     while index < separator {
         match args[index].as_str() {
+            "--no-supervisor" => {
+                link_supervisor = false;
+                index += 1;
+            }
             "--kind" => {
                 let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
                     eprintln!("missing value for --kind");
@@ -425,6 +433,9 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
     );
     match waited {
         Ok(Ok(agent)) => {
+            if link_supervisor {
+                super::orchestration::supervise_from_caller(&pane_id);
+            }
             response["result"]["agent"] = agent;
             super::print_response(&response)
         }
@@ -941,8 +952,11 @@ fn print_agent_help() {
     eprintln!("  herdr agent wait <target> [--until STATUS]... [--timeout MS]");
     eprintln!("  herdr agent attach <target> [--takeover]");
     eprintln!(
-        "  herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]"
+        "  herdr agent start <name> --kind KIND --pane ID [--timeout MS] [--no-supervisor] [-- <agent-args...>]"
     );
+    eprintln!("  herdr agent deliver <target> <text> [--source NAME] [--ttl DURATION]");
+    eprintln!("  herdr agent deliveries [<target>]");
+    eprintln!("  herdr agent cancel-delivery <delivery-id>");
     eprintln!("  herdr agent explain <target> [--json|--format text|json] [--verbose]");
     eprintln!(
         "  herdr agent explain --file PATH --agent LABEL [--json|--format text|json] [--verbose]"

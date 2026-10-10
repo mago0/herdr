@@ -2166,7 +2166,11 @@ mod tests {
                 .into_iter()
                 .map(|(_, event)| event.event)
                 .collect::<Vec<_>>(),
-            vec![EventKind::WorkspaceClosed, EventKind::WorktreeRemoved]
+            vec![
+                EventKind::PaneClosed,
+                EventKind::WorkspaceClosed,
+                EventKind::WorktreeRemoved
+            ]
         );
         assert!(app.state.plugin_command_logs.iter().any(|log| {
             log.event.as_deref() == Some("worktree.removed")

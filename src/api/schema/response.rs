@@ -278,6 +278,26 @@ pub enum ResponseResult {
         projection_revision: u64,
     },
     Ok {},
+    EventsRead {
+        /// Identifies one run of the server. A cursor from another epoch is void.
+        epoch: String,
+        latest: u64,
+        /// The cursor is older than the retained history; reconcile from current state.
+        lost: bool,
+        events: Vec<super::events::SequencedEvent>,
+    },
+    Delivery {
+        delivery: super::deliveries::DeliveryInfo,
+    },
+    DeliveryList {
+        deliveries: Vec<super::deliveries::DeliveryInfo>,
+    },
+    JobInfo {
+        job: super::jobs::JobInfo,
+    },
+    JobList {
+        jobs: Vec<super::jobs::JobInfo>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

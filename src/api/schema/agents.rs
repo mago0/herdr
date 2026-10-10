@@ -225,6 +225,18 @@ pub struct AgentInfo {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_cwd: Option<String>,
+    /// The pane that supervises this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_pane_id: Option<String>,
+    /// Deliveries that wait for this pane to become safe to type into.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_deliveries: Option<u32>,
+    /// Seconds without a screen change while the agent reports working. Absent when not stalled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stalled_secs: Option<u64>,
+    /// What the agent waits for, when it is blocked and the reason is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<String>,
     pub revision: u64,
 }
 

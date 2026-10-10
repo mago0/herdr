@@ -1838,6 +1838,9 @@ impl App {
             }
             changed
         });
+        if token_changed {
+            self.orchestration.note_tokens_changed();
+        }
 
         if presentation_requested {
             self.handle_internal_event(crate::events::AppEvent::HookMetadataReported {

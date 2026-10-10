@@ -671,6 +671,13 @@
                 "agent_status": {
                   "$ref": "#/schemas/event/$defs/AgentStatus"
                 },
+                "blocker": {
+                  "description": "What the agent waits for, when the status is blocked and the reason is known.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "display_agent": {
                   "type": [
                     "string",
@@ -723,6 +730,89 @@
                 "layout"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "pending": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "pane_delivery_changed",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id",
+                "pending"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "quiet_secs": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stalled": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "pane_agent_stalled",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id",
+                "stalled",
+                "quiet_secs"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "exit": {
+                  "format": "int32",
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "name": {
+                  "type": "string"
+                },
+                "news": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "job_finished",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "name",
+                "news"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -753,7 +843,10 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
-            "layout_updated"
+            "layout_updated",
+            "pane_delivery_changed",
+            "pane_agent_stalled",
+            "job_finished"
           ],
           "type": "string"
         },
@@ -1228,6 +1321,59 @@
     },
     "request": {
       "$defs": {
+        "AgentCancelDeliveryParams": {
+          "properties": {
+            "delivery_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "delivery_id"
+          ],
+          "type": "object"
+        },
+        "AgentDeliverParams": {
+          "properties": {
+            "source": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "target": {
+              "description": "Agent name or pane id. The delivery follows the pane this resolves to.",
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "ttl_ms": {
+              "description": "The delivery is dropped when it is still queued after this time.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "target",
+            "text"
+          ],
+          "type": "object"
+        },
+        "AgentDeliveriesParams": {
+          "properties": {
+            "target": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "AgentPromptParams": {
           "properties": {
             "target": {
@@ -2118,6 +2264,35 @@
             }
           ]
         },
+        "EventsReadParams": {
+          "properties": {
+            "after": {
+              "description": "Return events with a sequence number above this one. Without it, no events are returned.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "kinds": {
+              "description": "Dotted event names to keep. Empty keeps all.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "limit": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
         "EventsSubscribeParams": {
           "properties": {
             "subscriptions": {
@@ -2192,6 +2367,109 @@
           },
           "required": [
             "target"
+          ],
+          "type": "object"
+        },
+        "JobAddParams": {
+          "properties": {
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dedupe": {
+              "description": "Output equal to the last delivered output of this job is not delivered again. Default true.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "every_ms": {
+              "description": "Run on this interval. At least 1000.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "name": {
+              "description": "Unique job name. Adding a job with an existing name replaces it.",
+              "type": "string"
+            },
+            "on_events": {
+              "description": "Run when one of these events occurs, by dotted name.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "on_path": {
+              "description": "Run when this file changes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "owner_pane_id": {
+              "description": "The job is removed when this pane closes.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "target": {
+              "description": "Agent name or pane id that receives the output of a run that exits 0.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timeout_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "until_ms": {
+              "description": "Unix time in milliseconds after which the job is removed.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "command"
+          ],
+          "type": "object"
+        },
+        "JobTarget": {
+          "properties": {
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
           ],
           "type": "object"
         },
@@ -3262,6 +3540,31 @@
           ],
           "type": "object"
         },
+        "PaneSuperviseParams": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "report": {
+              "description": "Conditions of the supervised pane that the server reports to the supervisor.",
+              "items": {
+                "$ref": "#/schemas/request/$defs/SuperviseReport"
+              },
+              "type": "array"
+            },
+            "supervisor": {
+              "description": "Agent name or pane id of the supervisor. Null or absent clears the link.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "pane_id"
+          ],
+          "type": "object"
+        },
         "PaneSwapParams": {
           "properties": {
             "direction": {
@@ -4269,6 +4572,14 @@
               "type": "object"
             }
           ]
+        },
+        "SuperviseReport": {
+          "enum": [
+            "blocked",
+            "exited",
+            "stalled"
+          ],
+          "type": "string"
         },
         "TabCreateParams": {
           "properties": {
@@ -5436,6 +5747,118 @@
         {
           "properties": {
             "method": {
+              "const": "agent.deliver",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentDeliverParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.deliveries",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentDeliveriesParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.cancel_delivery",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentCancelDeliveryParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "job.add",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/JobAddParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "job.list",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EmptyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "job.remove",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/JobTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "job.run",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/JobTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.split",
               "type": "string"
             },
@@ -5980,6 +6403,22 @@
         {
           "properties": {
             "method": {
+              "const": "pane.supervise",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneSuperviseParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.clear_agent_authority",
               "type": "string"
             },
@@ -6065,6 +6504,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/EventsWaitParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "events.read",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/EventsReadParams"
             }
           },
           "required": [
@@ -6561,6 +7016,13 @@
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
             },
+            "blocker": {
+              "description": "What the agent waits for, when it is blocked and the reason is known.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "completion_seq": {
               "description": "The current idle transition completed work, independently of who has viewed it.",
               "format": "uint64",
@@ -6606,6 +7068,15 @@
             "pane_id": {
               "type": "string"
             },
+            "pending_deliveries": {
+              "description": "Deliveries that wait for this pane to become safe to type into.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "revision": {
               "format": "uint64",
               "minimum": 0,
@@ -6613,6 +7084,15 @@
             },
             "screen_detection_skipped": {
               "type": "boolean"
+            },
+            "stalled_secs": {
+              "description": "Seconds without a screen change while the agent reports working. Absent when not stalled.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "state_change_seq": {
               "default": 0,
@@ -6625,6 +7105,13 @@
                 "type": "string"
               },
               "type": "object"
+            },
+            "supervisor_pane_id": {
+              "description": "The pane that supervises this one.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "tab_id": {
               "type": "string"
@@ -6789,6 +7276,48 @@
             "applied",
             "partial",
             "failed"
+          ],
+          "type": "string"
+        },
+        "DeliveryInfo": {
+          "properties": {
+            "delivery_id": {
+              "type": "string"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "queued_at_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "source": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "$ref": "#/schemas/success_response/$defs/DeliveryState"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "delivery_id",
+            "pane_id",
+            "text",
+            "state",
+            "queued_at_ms"
+          ],
+          "type": "object"
+        },
+        "DeliveryState": {
+          "enum": [
+            "queued",
+            "delivered"
           ],
           "type": "string"
         },
@@ -7384,6 +7913,13 @@
                 "agent_status": {
                   "$ref": "#/schemas/success_response/$defs/AgentStatus"
                 },
+                "blocker": {
+                  "description": "What the agent waits for, when the status is blocked and the reason is known.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "display_agent": {
                   "type": [
                     "string",
@@ -7436,6 +7972,89 @@
                 "layout"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "pending": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "pane_delivery_changed",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id",
+                "pending"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "pane_id": {
+                  "type": "string"
+                },
+                "quiet_secs": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stalled": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "pane_agent_stalled",
+                  "type": "string"
+                },
+                "workspace_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "workspace_id",
+                "stalled",
+                "quiet_secs"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "exit": {
+                  "format": "int32",
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "name": {
+                  "type": "string"
+                },
+                "news": {
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "job_finished",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "name",
+                "news"
+              ],
+              "type": "object"
             }
           ]
         },
@@ -7481,7 +8100,10 @@
             "pane_exited",
             "pane_agent_detected",
             "pane_agent_status_changed",
-            "layout_updated"
+            "layout_updated",
+            "pane_delivery_changed",
+            "pane_agent_stalled",
+            "job_finished"
           ],
           "type": "string"
         },
@@ -7666,6 +8288,111 @@
           },
           "required": [
             "messages"
+          ],
+          "type": "object"
+        },
+        "JobInfo": {
+          "properties": {
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "cwd": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "dedupe": {
+              "type": "boolean"
+            },
+            "every_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "last_exit": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "last_news": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "last_run_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "on_events": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "on_path": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "owner_pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "running": {
+              "type": "boolean"
+            },
+            "runs": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "target_pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "timeout_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "until_ms": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "command",
+            "timeout_ms",
+            "dedupe",
+            "running",
+            "runs"
           ],
           "type": "object"
         },
@@ -10415,8 +11142,134 @@
                 "type"
               ],
               "type": "object"
+            },
+            {
+              "properties": {
+                "epoch": {
+                  "description": "Identifies one run of the server. A cursor from another epoch is void.",
+                  "type": "string"
+                },
+                "events": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/SequencedEvent"
+                  },
+                  "type": "array"
+                },
+                "latest": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "lost": {
+                  "description": "The cursor is older than the retained history; reconcile from current state.",
+                  "type": "boolean"
+                },
+                "type": {
+                  "const": "events_read",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "epoch",
+                "latest",
+                "lost",
+                "events"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "delivery": {
+                  "$ref": "#/schemas/success_response/$defs/DeliveryInfo"
+                },
+                "type": {
+                  "const": "delivery",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "delivery"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "deliveries": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/DeliveryInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "delivery_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "deliveries"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "job": {
+                  "$ref": "#/schemas/success_response/$defs/JobInfo"
+                },
+                "type": {
+                  "const": "job_info",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "job"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "jobs": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/JobInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "job_list",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "jobs"
+              ],
+              "type": "object"
             }
           ]
+        },
+        "SequencedEvent": {
+          "properties": {
+            "data": {
+              "$ref": "#/schemas/success_response/$defs/EventData"
+            },
+            "event": {
+              "$ref": "#/schemas/success_response/$defs/EventKind"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "seq",
+            "event",
+            "data"
+          ],
+          "type": "object"
         },
         "ServerCapabilities": {
           "properties": {

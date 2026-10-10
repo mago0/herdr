@@ -17,6 +17,7 @@ mod creation;
 mod custom_commands;
 mod git_refresh;
 mod ids;
+pub(crate) mod orchestration;
 mod popup;
 mod runtime;
 mod session;
@@ -158,6 +159,7 @@ pub struct App {
     pub(crate) config_reloaded_from_disk: bool,
     client_shell_keybindings_profile: Option<String>,
     endpoint_commands: custom_commands::EndpointCommandRegistry,
+    pub(crate) orchestration: orchestration::Orchestration,
 }
 
 pub(crate) const APP_EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -624,6 +626,12 @@ impl App {
             config_reloaded_from_disk: false,
             client_shell_keybindings_profile,
             endpoint_commands,
+            orchestration: orchestration::Orchestration::new(
+                policy
+                    .persist_session
+                    .then(orchestration::Orchestration::production_store_path),
+                config.session.agent_stall_after_secs,
+            ),
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
@@ -854,6 +862,11 @@ impl App {
                 self.state.sound = config.ui.sound.clone();
                 self.state.toast_config = config.ui.toast.clone();
             }
+        }
+
+        if !invalid_section("session") {
+            self.orchestration.stall_after =
+                orchestration::stall_after(config.session.agent_stall_after_secs);
         }
 
         if !invalid_section("session")
