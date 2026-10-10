@@ -968,6 +968,88 @@ async fn sidebar_plugin_that_is_not_installed_keeps_the_native_spaces_list() {
     assert!(state.hits.sidebar_plugins[0].is_empty());
 }
 
+fn sidebar_notice_marker(name: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    std::env::temp_dir().join(format!(
+        "herdr-sidebar-notice-{name}-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
+/// A shell whose sidebar plugin is `spec`, with no plugin installed, after one frame.
+fn shell_with_missing_sidebar_plugin(spec: &str, marker: &std::path::Path) -> ClientShellState {
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = spec.into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_sidebar_plugin_resolver(std::sync::Arc::new(|_, _| None));
+    state.set_sidebar_plugin_notice_marker(marker.to_path_buf());
+    state.set_snapshot(Box::new(snapshot()));
+    sidebar_text(&mut state);
+    state
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sidebar_plugin_that_is_not_installed_is_named_once_with_how_to_install_it() {
+    let marker = sidebar_notice_marker("once");
+    assert_eq!(
+        Config::default().ui.sidebar.spaces.plugin,
+        "herdr-tree:tree"
+    );
+
+    let state = shell_with_missing_sidebar_plugin("herdr-tree:tree", &marker);
+    let notice = state
+        .visible_endpoint_notice
+        .as_ref()
+        .expect("the first frame tells the user");
+    assert_eq!(notice.title, "Sidebar plugin is not installed");
+    assert!(
+        notice
+            .body
+            .contains("herdr plugin install mago0/herdr-plugins/tree"),
+        "{}",
+        notice.body
+    );
+    assert!(
+        notice.body.contains("ui.sidebar.spaces.plugin"),
+        "{}",
+        notice.body
+    );
+
+    // The next start of the client says nothing: the user was told.
+    let again = shell_with_missing_sidebar_plugin("herdr-tree:tree", &marker);
+    assert!(again.visible_endpoint_notice.is_none());
+
+    // Another plugin is another thing to tell, with no command that is not its own.
+    let other = shell_with_missing_sidebar_plugin("acme-rows:list", &marker);
+    let notice = other
+        .visible_endpoint_notice
+        .as_ref()
+        .expect("a new spec is told");
+    assert!(notice.body.contains("acme-rows"), "{}", notice.body);
+    assert!(!notice.body.contains("mago0"), "{}", notice.body);
+    let _ = std::fs::remove_file(marker);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sidebar_with_no_plugin_set_or_with_its_plugin_running_shows_no_notice() {
+    let marker = sidebar_notice_marker("quiet");
+    let unset = shell_with_missing_sidebar_plugin("", &marker);
+    assert!(unset.visible_endpoint_notice.is_none());
+
+    let mut config = Config::default();
+    config.ui.sidebar.spaces.plugin = "fake:pane".into();
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
+    state.set_sidebar_plugin_resolver(fake_sidebar_plugin("sleep 5"));
+    state.set_sidebar_plugin_notice_marker(marker.clone());
+    state.set_snapshot(Box::new(snapshot()));
+    sidebar_text(&mut state);
+    assert!(state.visible_endpoint_notice.is_none());
+    assert!(!marker.exists());
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn sidebar_plugin_that_keeps_exiting_gives_the_section_back() {
     let mut config = Config::default();

@@ -492,6 +492,9 @@ async fn run_client_loop(
                 }),
         );
         shell.set_sidebar_plugin_resolver(shell::installed_plugin_resolver());
+        shell.set_sidebar_plugin_notice_marker(
+            crate::config::config_dir().join("sidebar-plugin-notice"),
+        );
         if local_unavailable {
             shell.set_endpoint_status(
                 &endpoint::ClientEndpointId::Local,

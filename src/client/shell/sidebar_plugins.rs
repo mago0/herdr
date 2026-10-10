@@ -66,6 +66,10 @@ impl SidebarSection {
     }
 }
 
+/// The plugin that the default config names for the spaces section, and how to install it.
+const DEFAULT_TREE_PLUGIN_ID: &str = "herdr-tree";
+const DEFAULT_TREE_PLUGIN_INSTALL: &str = "herdr plugin install mago0/herdr-plugins/tree";
+
 /// The process a sidebar plugin runs as.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SidebarPluginCommand {
@@ -271,6 +275,12 @@ pub(crate) struct SidebarPlugins {
     /// A right-click sent to a plugin pane that has not named its row yet.
     menu_wait: std::cell::Cell<Option<(SidebarSection, u16, u16, Instant)>>,
     menu_request: Option<SidebarMenuRequest>,
+    /// A configured spec that names no installed plugin, until the shell has told the user.
+    missing: Option<(String, SidebarSection)>,
+    /// The specs the user was told about in this run.
+    told_missing: Vec<String>,
+    /// The file that holds the last spec the user was told about, so that it is told one time.
+    notice_marker: Option<PathBuf>,
 }
 
 /// The part of each expanded sidebar section that a plugin pane draws.
@@ -299,6 +309,22 @@ impl SidebarPlugins {
         self.resolver = Some(resolver);
     }
 
+    /// The spec that names no installed plugin, when the user has not been told about it. A
+    /// spec is given one time for each marker file, so a later start of the client is quiet.
+    fn take_missing(&mut self) -> Option<(String, SidebarSection)> {
+        let (spec, section) = self.missing.take()?;
+        if let Some(marker) = &self.notice_marker {
+            if std::fs::read_to_string(marker).is_ok_and(|told| told.trim() == spec) {
+                return None;
+            }
+            if let Some(parent) = marker.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(marker, &spec);
+        }
+        Some((spec, section))
+    }
+
     /// Start, stop and resize the plugin panes to match the configured specs and the layout.
     pub(super) fn sync(
         &mut self,
@@ -325,10 +351,15 @@ impl SidebarPlugins {
                 .as_ref()
                 .is_some_and(|(failed, at)| failed == spec && now < *at);
             if slot.pane.is_none() && !waiting {
-                slot.pane = resolver
-                    .as_ref()
-                    .and_then(|resolve| resolve(spec, section))
-                    .and_then(|command| spawn(spec, &command, rect));
+                let command = resolver.as_ref().and_then(|resolve| resolve(spec, section));
+                if command.is_none()
+                    && resolver.is_some()
+                    && !self.told_missing.iter().any(|told| told == spec)
+                {
+                    self.told_missing.push(spec.to_owned());
+                    self.missing = Some((spec.to_owned(), section));
+                }
+                slot.pane = command.and_then(|command| spawn(spec, &command, rect));
                 slot.retry = slot
                     .pane
                     .is_none()
@@ -744,6 +775,30 @@ impl super::ClientShellState {
         self.sidebar_plugins.set_resolver(resolver);
     }
 
+    pub(crate) fn set_sidebar_plugin_notice_marker(&mut self, marker: PathBuf) {
+        self.sidebar_plugins.notice_marker = Some(marker);
+    }
+
+    /// Tells the user that the sidebar plugin in the config is not installed, and how to get it
+    /// or how to keep the native section.
+    fn tell_sidebar_plugin_missing(&mut self, spec: &str, section: SidebarSection) {
+        let plugin_id = spec
+            .split_once(':')
+            .map_or(spec, |(plugin_id, _)| plugin_id);
+        let key = format!("ui.sidebar.{}.plugin", section.name());
+        let how = if plugin_id == DEFAULT_TREE_PLUGIN_ID {
+            format!("Run: {DEFAULT_TREE_PLUGIN_INSTALL} (needs Go).")
+        } else {
+            format!("Install or enable {plugin_id} with herdr plugin.")
+        };
+        self.push_endpoint_notice(
+            super::state::ClientEndpointNoticeKind::Setup,
+            spec.to_owned(),
+            "Sidebar plugin is not installed",
+            format!("{how} Or set {key} = \"\"."),
+        );
+    }
+
     /// Match the plugin panes to the sidebar that the next frame draws.
     pub(super) fn sync_sidebar_plugins(&mut self, sidebar: Rect) {
         let expanded = sidebar.width > 1 && !self.sidebar_collapsed && self.endpoints.len() == 1;
@@ -764,6 +819,9 @@ impl super::ClientShellState {
             focused_pane_id.as_deref(),
             Instant::now(),
         );
+        if let Some((spec, section)) = self.sidebar_plugins.take_missing() {
+            self.tell_sidebar_plugin_missing(&spec, section);
+        }
     }
 
     pub(crate) fn tick_sidebar_plugins(&mut self, now: Instant) -> bool {

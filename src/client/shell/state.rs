@@ -700,6 +700,8 @@ pub(super) enum ClientEndpointNoticeKind {
     Rejected,
     Timeout,
     Unavailable,
+    /// Something the user can set up. It is no failure of a request.
+    Setup,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

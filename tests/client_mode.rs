@@ -124,6 +124,12 @@ fn spawn_client_process_with_args_and_env(
         })
         .unwrap();
 
+    // The client under test has no sidebar plugin. This file says the user knows, so that the
+    // one-time notice about it does not cover the screen text the tests read.
+    let app_dir = config_home.join(app_dir_name());
+    fs::create_dir_all(&app_dir).unwrap();
+    fs::write(app_dir.join("sidebar-plugin-notice"), "herdr-tree:tree").unwrap();
+
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
     cmd.args(args);
     cmd.env("HERDR_DISABLE_SOUND", "1");

@@ -371,10 +371,11 @@ impl ClientShellState {
         } else if !self.endpoint_notice_seen.insert(key.clone()) {
             return false;
         }
-        let duration_seconds = if kind == ClientEndpointNoticeKind::Rejected {
-            3
-        } else {
-            8
+        let duration_seconds = match kind {
+            ClientEndpointNoticeKind::Rejected => 3,
+            // A command to copy needs more time than a line to read.
+            ClientEndpointNoticeKind::Setup => 20,
+            _ => 8,
         };
         self.visible_endpoint_notice = Some(ClientVisibleEndpointNotice {
             key,
