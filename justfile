@@ -250,3 +250,13 @@ release $version $preview:
 # Print default config
 default-config:
     cargo run --release --locked -- --default-config
+
+# Fork only. Build the release binary and copy it to a folder outside `target`, so that a clean
+# or a build that fails cannot take away the binary that is on PATH. The copy is put in place in
+# one step, which is safe while servers run from it.
+install-fork dir="$HOME/.local/lib/herdr-fork":
+    cargo build --release --locked
+    mkdir -p "{{dir}}"
+    cp target/release/herdr "{{dir}}/herdr.new"
+    mv "{{dir}}/herdr.new" "{{dir}}/herdr"
+    "{{dir}}/herdr" --version
