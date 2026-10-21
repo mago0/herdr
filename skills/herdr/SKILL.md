@@ -246,7 +246,7 @@ herdr job remove ci-watch
 
 - A job needs at least one trigger: `--every` (at least 1s), `--on EVENT`, or `--path FILE`. `--on` takes any event a plugin hook can use, except `pane.delivery_changed`. An interval job also runs once at once. `job run` runs it now.
 - The command after `--` is an argument list, not shell text. Use `sh -c '...'` for pipes or variables. It runs in your current directory unless `--cwd` says otherwise, and does not run when that folder is gone.
-- News: a run that exits 0 and prints text has news. With `--to`, that text is delivered to the target as a delivery. News equal to the last news the job delivered is not delivered again; `--no-dedupe` turns that off. Print nothing when nothing changed.
+- News: a run that exits 0 and prints text has news. With `--to`, that text is delivered to the target as a delivery. News equal to the last news the job delivered is not delivered again; `--no-dedupe` turns that off. Print nothing when nothing changed. A run whose read fails prints nothing and exits non-zero, and the watcher's own health or errors never go in the news text: only the last delivery is compared, so news that flips between an error line and the state is delivered again on every flip.
 - Owner: the calling pane owns the job by default. The job is removed when its owner pane or its `--to` pane closes, at `--until`, or by `job remove`. `--owner PANE_ID` names another owner; `--no-owner` keeps the job until it is removed, so remove it yourself.
 - `job add` with an existing name replaces that job. Names match `[a-z0-9][a-z0-9_.-]{0,63}`.
 - `--timeout` limits one run (default 60s, from 1s to 1h). The command runs in its own process group, which is stopped at the time limit, on remove or replace, and when the server stops.
