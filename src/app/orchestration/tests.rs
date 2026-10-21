@@ -1541,3 +1541,98 @@ async fn output_printed_before_a_process_that_left_the_group_is_still_news() {
     f.wait_for_runs("detached", 1).await;
     assert_eq!(typed(&mut f.worker_rx).await, "up\r");
 }
+
+impl Fixture {
+    /// Makes the last thing a person did in a pane `secs` seconds old.
+    fn quiet_for(&mut self, ws_idx: usize, pane: PaneId, secs: u64) {
+        let terminal = self.terminal(ws_idx, pane);
+        let at = Instant::now()
+            .checked_sub(Duration::from_secs(secs))
+            .unwrap();
+        self.app.orchestration.activity.insert(terminal, at);
+    }
+}
+
+#[tokio::test]
+async fn a_focused_pane_takes_a_delivery_once_a_person_is_quiet_in_it() {
+    let mut f = fixture();
+    assert_eq!(
+        f.deliver("lead", "wake").held_by.as_deref(),
+        Some("focused")
+    );
+    f.quiet_for(0, f.supervisor, 29);
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "");
+
+    f.quiet_for(0, f.supervisor, 31);
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "wake\r");
+}
+
+#[tokio::test]
+async fn a_key_in_the_focused_pane_starts_its_quiet_time_again() {
+    let mut f = fixture();
+    f.deliver("lead", "wake");
+    f.quiet_for(0, f.supervisor, 31);
+    let terminal = f.terminal(0, f.supervisor);
+    // An arrow key leaves no text in the input and still counts.
+    f.app.note_pane_keys(&terminal, &[]);
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "");
+}
+
+#[tokio::test]
+async fn focus_that_comes_to_a_pane_starts_its_quiet_time() {
+    let mut f = fixture();
+    f.tick();
+    f.quiet_for(0, f.supervisor, 31);
+    f.app.state.active = Some(1);
+    f.tick();
+    f.app.state.active = Some(0);
+    assert_eq!(
+        f.deliver("lead", "wake").held_by.as_deref(),
+        Some("focused")
+    );
+}
+
+#[tokio::test]
+async fn a_focused_pane_that_is_scrolled_back_holds_deliveries_past_the_quiet_time() {
+    let mut f = fixture();
+    let lines: String = (0..200).map(|n| format!("line {n}\r\n")).collect();
+    let (runtime, rx) = crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+        80,
+        24,
+        1 << 20,
+        lines.as_bytes(),
+        64,
+    );
+    runtime.set_scroll_offset_from_bottom(5);
+    f.app.state.insert_test_runtime(f.supervisor, runtime);
+    f.supervisor_rx = rx;
+
+    f.deliver("lead", "wake");
+    f.quiet_for(0, f.supervisor, 31);
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "");
+    let terminal = f.terminal(0, f.supervisor);
+    assert_eq!(
+        f.app
+            .pane_readiness(&terminal)
+            .and_then(PaneReadiness::hold),
+        Some("scrolled_back")
+    );
+
+    f.quiet_for(0, f.supervisor, deliveries::DRAFT_HOLD.as_secs() + 1);
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "wake\r");
+}
+
+#[tokio::test]
+async fn no_focus_hold_limit_holds_a_delivery_while_the_pane_is_focused() {
+    let mut f = fixture();
+    f.app.orchestration.focus_hold = None;
+    f.deliver("lead", "wake");
+    f.quiet_for(0, f.supervisor, 3600);
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "");
+}

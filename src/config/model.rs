@@ -273,6 +273,9 @@ pub struct SessionConfig {
     /// Seconds an agent may report working with an unchanged screen before it
     /// counts as stalled. Zero disables the check. Default: 600.
     pub agent_stall_after_secs: u32,
+    /// Seconds a focused pane holds deliveries after a person last pressed a key in it or
+    /// brought it into view. Zero holds them as long as the pane is focused. Default: 30.
+    pub delivery_focus_hold_secs: u32,
 }
 
 impl Default for SessionConfig {
@@ -281,6 +284,7 @@ impl Default for SessionConfig {
             resume_agents_on_restore: true,
             startup_per_agent_delay_ms: 100,
             agent_stall_after_secs: 600,
+            delivery_focus_hold_secs: 30,
         }
     }
 }

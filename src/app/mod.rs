@@ -688,6 +688,8 @@ impl App {
                 config.session.agent_stall_after_secs,
             ),
         };
+        app.orchestration.focus_hold =
+            orchestration::focus_hold(config.session.delivery_focus_hold_secs);
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
         app.refresh_restored_workspace_git_metadata();
@@ -931,6 +933,8 @@ impl App {
         if !invalid_section("session") {
             self.orchestration.stall_after =
                 orchestration::stall_after(config.session.agent_stall_after_secs);
+            self.orchestration.focus_hold =
+                orchestration::focus_hold(config.session.delivery_focus_hold_secs);
         }
 
         if !invalid_section("session")

@@ -7336,7 +7336,7 @@
               "type": "string"
             },
             "held_by": {
-              "description": "Why a queued delivery waits: `agent_not_ready`, `agent_busy`, `unsent_input` or\n`focused`. Absent when it waits only for the delivery before it.",
+              "description": "Why a queued delivery waits: `agent_not_ready`, `agent_busy`, `unsent_input`, `focused`\nor `scrolled_back`. Absent when it waits only for the delivery before it.",
               "type": [
                 "string",
                 "null"

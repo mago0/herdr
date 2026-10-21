@@ -227,7 +227,7 @@ herdr agent deliveries reviewer
 herdr agent cancel-delivery <delivery-id>
 ```
 
-The server types a delivery only when the pane hosts a ready agent that waits for input (`idle` or `done`), the pane is not the focused pane of an attached client, and no text that a person typed there is still unsent. The result's `delivery.state` is `delivered` or `queued`. `delivered` means the text went to the pane, not that the agent read it. A queued delivery has `held_by`: `agent_not_ready`, `agent_busy`, `unsent_input`, or `focused`.
+The server types a delivery only when the pane hosts a ready agent that waits for input (`idle` or `done`), no text that a person typed there is still unsent, and nobody is using the pane. A focused pane holds deliveries for `session.delivery_focus_hold_secs` (30 by default) after the last key or focus change in it, and for 10 minutes while it shows its scrollback. The result's `delivery.state` is `delivered` or `queued`. `delivered` means the text went to the pane, not that the agent read it. A queued delivery has `held_by`: `agent_not_ready`, `agent_busy`, `unsent_input`, `focused`, or `scrolled_back`.
 
 - Deliveries for one pane are typed in order, one at a time. At most 64 wait for one pane.
 - `--ttl` drops a delivery that still waits after that time. Without it, a delivery waits until it is typed, cancelled, or its pane closes. Deliveries survive a server restart and a live handoff.

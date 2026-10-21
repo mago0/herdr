@@ -75,6 +75,13 @@ pub(crate) struct Orchestration {
     drafts: deliveries::DraftTracker,
     /// Terminals that a client is attached to alone, outside the shell.
     pub(crate) attached_terminals: std::collections::HashSet<TerminalId>,
+    /// When a person last pressed a key in a terminal or brought it into view.
+    pub(crate) activity: HashMap<TerminalId, Instant>,
+    /// The terminals in view at the last look, with how far each is scrolled back.
+    in_view: HashMap<TerminalId, usize>,
+    /// How long a focused pane holds deliveries after the last activity in it. None holds them
+    /// as long as the pane is focused.
+    pub(crate) focus_hold: Option<Duration>,
     /// Counts each time an agent starts to wait at a dialog, so that two dialogs have two names.
     block_count: u64,
     pub(crate) stalls: StallTable,
@@ -99,6 +106,9 @@ impl Orchestration {
             blockers: HashMap::new(),
             drafts: deliveries::DraftTracker::default(),
             attached_terminals: std::collections::HashSet::new(),
+            activity: HashMap::new(),
+            in_view: HashMap::new(),
+            focus_hold: focus_hold(DEFAULT_FOCUS_HOLD_SECS),
             block_count: 0,
             stalls: StallTable::default(),
             stall_after: stall_after(stall_after_secs),
@@ -133,6 +143,13 @@ impl Orchestration {
     fn pending_for(&self, terminal: &TerminalId) -> u32 {
         self.deliveries.pending_for(terminal) + u32::from(self.in_flight.contains_key(terminal))
     }
+}
+
+pub(crate) const DEFAULT_FOCUS_HOLD_SECS: u32 = 30;
+
+/// The focus hold for a configured number of seconds, where 0 means no limit.
+pub(crate) fn focus_hold(secs: u32) -> Option<Duration> {
+    (secs > 0).then(|| Duration::from_secs(secs.into()))
 }
 
 pub(crate) fn stall_after(secs: u32) -> Option<Duration> {
@@ -207,8 +224,11 @@ impl App {
             .unwrap_or_else(|| terminal.to_string())
     }
 
-    /// Records what a person's keys do to the unsent text in a pane's input.
+    /// Records that a person used a pane, and what their keys do to the unsent text in its input.
     pub(crate) fn note_pane_keys(&mut self, terminal: &TerminalId, keys: &[deliveries::DraftKey]) {
+        self.orchestration
+            .activity
+            .insert(terminal.clone(), Instant::now());
         if keys.is_empty() {
             return;
         }
@@ -230,6 +250,46 @@ impl App {
         }
     }
 
+    /// How far a terminal is scrolled back from the bottom of its output.
+    fn scroll_offset(&self, ws_idx: usize, pane_id: crate::layout::PaneId) -> usize {
+        self.state
+            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+            .and_then(|runtime| runtime.scroll_metrics())
+            .map_or(0, |metrics| metrics.offset_from_bottom)
+    }
+
+    /// Notes activity in each terminal that came into view or scrolled since the last look: the
+    /// focused pane of an attached client, and the terminals a client is attached to alone.
+    fn observe_in_view(&mut self, now: Instant) {
+        let mut seen: Vec<TerminalId> = self
+            .orchestration
+            .attached_terminals
+            .iter()
+            .cloned()
+            .collect();
+        if self.orchestration.client_attached {
+            if let Some(terminal) = self.state.active.and_then(|ws_idx| {
+                let ws = self.state.workspaces.get(ws_idx)?;
+                ws.terminal_id(ws.focused_pane_id()?).cloned()
+            }) {
+                seen.push(terminal);
+            }
+        }
+        let in_view: HashMap<TerminalId, usize> = seen
+            .into_iter()
+            .filter_map(|terminal| {
+                let (ws_idx, pane_id) = self.terminal_location(&terminal)?;
+                Some((terminal, self.scroll_offset(ws_idx, pane_id)))
+            })
+            .collect();
+        for (terminal, offset) in &in_view {
+            if self.orchestration.in_view.get(terminal) != Some(offset) {
+                self.orchestration.activity.insert(terminal.clone(), now);
+            }
+        }
+        self.orchestration.in_view = in_view;
+    }
+
     fn pane_readiness(&self, terminal: &TerminalId) -> Option<PaneReadiness> {
         let (ws_idx, pane_id) = self.terminal_location(terminal)?;
         let state = self.state.terminals.get(terminal)?;
@@ -238,6 +298,10 @@ impl App {
         let focused = self.state.active == Some(ws_idx)
             && ws.active_tab == tab_idx
             && ws.focused_pane_id() == Some(pane_id);
+        let last = self.orchestration.activity.get(terminal).copied();
+        let now = Instant::now();
+        let within =
+            |hold: Duration| last.is_some_and(|at| now.saturating_duration_since(at) < hold);
         Some(PaneReadiness {
             agent_ready: state.effective_known_agent().is_some()
                 && !state.managed_agent_launch_pending(),
@@ -246,6 +310,9 @@ impl App {
             focused,
             client_attached: self.orchestration.client_attached,
             attached_directly: self.orchestration.attached_terminals.contains(terminal),
+            recent_input: self.orchestration.focus_hold.is_none_or(&within),
+            scrolled_back: self.scroll_offset(ws_idx, pane_id) > 0
+                && within(deliveries::DRAFT_HOLD),
         })
     }
 
@@ -305,6 +372,7 @@ impl App {
                 .deliveries
                 .push(terminal.clone(), text, source, now_ms(), ttl_ms);
         self.orchestration.dirty = true;
+        self.observe_in_view(Instant::now());
         self.drain_terminal_deliveries(&terminal);
         let state = if self
             .orchestration
@@ -844,6 +912,9 @@ impl App {
         let mut drafts = std::mem::take(&mut self.orchestration.drafts);
         drafts.retain(|terminal| self.terminal_location(terminal).is_some());
         self.orchestration.drafts = drafts;
+        let mut activity = std::mem::take(&mut self.orchestration.activity);
+        activity.retain(|terminal, _| self.terminal_location(terminal).is_some());
+        self.orchestration.activity = activity;
     }
 
     fn sample_stalls(&mut self, now: Instant) {
@@ -910,6 +981,7 @@ impl App {
         self.orchestration.next_tick = Some(now + TICK);
         self.ensure_orchestration_loaded();
         self.sweep_gone_terminals();
+        self.observe_in_view(now);
         for expired in self.orchestration.deliveries.expire(now_ms()) {
             self.orchestration.dirty = true;
             self.emit_delivery_changed(&expired.terminal);

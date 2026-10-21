@@ -413,6 +413,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Seconds an agent may report working with an unchanged screen before it counts
 # as stalled; 0 disables the check.
 # agent_stall_after_secs = 600
+# Seconds a focused pane holds deliveries after the last key or focus change in
+# it; a pane scrolled back holds them longer. 0 holds them while it is focused.
+# delivery_focus_hold_secs = 30
 
 [remote]
 # Whether herdr manages the ssh config used for `herdr --remote`.

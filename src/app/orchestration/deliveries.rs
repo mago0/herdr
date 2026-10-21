@@ -32,6 +32,10 @@ pub(crate) struct PaneReadiness {
     pub(crate) client_attached: bool,
     /// A client is attached to this terminal alone, so a person has it in front of them.
     pub(crate) attached_directly: bool,
+    /// A person pressed a key in the pane, or brought it into view, within the focus hold.
+    pub(crate) recent_input: bool,
+    /// The pane shows its scrollback, and a person did something in it within [`DRAFT_HOLD`].
+    pub(crate) scrolled_back: bool,
 }
 
 impl PaneReadiness {
@@ -47,11 +51,18 @@ impl PaneReadiness {
             Some("agent_busy")
         } else if self.unsent_input {
             Some("unsent_input")
-        } else if (self.focused && self.client_attached) || self.attached_directly {
+        } else if self.in_view() && self.recent_input {
             Some("focused")
+        } else if self.in_view() && self.scrolled_back {
+            Some("scrolled_back")
         } else {
             None
         }
+    }
+
+    /// A person has the pane in front of them and can type into it.
+    fn in_view(self) -> bool {
+        (self.focused && self.client_attached) || self.attached_directly
     }
 }
 
@@ -348,6 +359,8 @@ mod tests {
             focused: false,
             client_attached: true,
             attached_directly: false,
+            recent_input: false,
+            scrolled_back: false,
         }
     }
 
@@ -507,9 +520,34 @@ mod tests {
         let attached = PaneReadiness {
             attached_directly: true,
             client_attached: false,
+            recent_input: true,
             ..ready()
         };
         assert_eq!(attached.hold(), Some("focused"));
+    }
+
+    #[test]
+    fn a_focused_pane_where_a_person_is_quiet_is_safe() {
+        assert!(PaneReadiness {
+            focused: true,
+            ..ready()
+        }
+        .safe());
+    }
+
+    #[test]
+    fn a_focused_pane_that_is_scrolled_back_is_not_safe() {
+        let scrolled = PaneReadiness {
+            focused: true,
+            scrolled_back: true,
+            ..ready()
+        };
+        assert_eq!(scrolled.hold(), Some("scrolled_back"));
+        assert!(PaneReadiness {
+            focused: false,
+            ..scrolled
+        }
+        .safe());
     }
 
     #[test]
@@ -554,6 +592,7 @@ mod tests {
     fn a_focused_pane_is_not_safe_while_a_client_is_attached() {
         let focused = PaneReadiness {
             focused: true,
+            recent_input: true,
             ..ready()
         };
         assert!(!focused.safe());

@@ -1477,6 +1477,12 @@
           "type": "integer",
           "default": "600",
           "description": "Seconds an agent may report working with an unchanged screen before it counts as stalled. 0 disables the check."
+        },
+        {
+          "key": "session.delivery_focus_hold_secs",
+          "type": "integer",
+          "default": "30",
+          "description": "Seconds a focused pane holds deliveries after the last key or focus change in it. A pane that shows its scrollback holds them for 10 minutes. 0 holds them as long as the pane is focused."
         }
       ]
     },
