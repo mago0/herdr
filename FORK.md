@@ -16,6 +16,10 @@ Pane tokens are one map for each pane (`pane.report_metadata`). Two of them have
 
 The client's pane label dialog writes `label` under the source `herdr`. An empty label clears it.
 
+## Workspaces opened for worktrees
+
+`worktree create` and `worktree open` open the repository's main checkout as a parent workspace when none is open. Herdr marks that workspace with `opened_for_worktrees: true` in `workspace get` and `workspace list`. The mark goes away when the workspace is renamed or gets a second pane, and then `workspace.updated` is emitted. A sidebar can hide marked workspaces.
+
 ## Sidebar tree
 
 The default for `ui.sidebar.spaces.plugin` is `herdr-tree:tree`: agents as a tree by supervisor. The plugin is not part of this repository. Install it once:

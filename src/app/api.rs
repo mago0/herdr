@@ -813,7 +813,11 @@ impl App {
     pub(super) fn emit_event(&mut self, event: crate::api::schema::EventEnvelope) {
         self.run_plugin_event_hooks(&event);
         self.run_jobs_for_event(&event);
+        let taken_up = self.worktree_parent_taken_up(&event);
         self.event_hub.push(event);
+        if let Some(ws_idx) = taken_up {
+            self.clear_opened_for_worktrees(ws_idx);
+        }
     }
 
     /// Public ids of the panes of one tab, or of a whole workspace, with the workspace id.

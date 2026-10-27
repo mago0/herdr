@@ -134,6 +134,8 @@ An agent record has four optional fields for this: `supervisor_pane_id`, `pendin
 
 Deliveries, links, jobs, and pane tokens with no time limit are kept in `orchestration.json` in the session directory, so they survive a server restart and a live handoff.
 
+`worktree.create` and `worktree.open` open the repository's main checkout as a parent workspace when no workspace for it is open. Such a workspace has `"opened_for_worktrees": true` in `workspace.get`, `workspace.list` and workspace events, until a person takes it up: the mark goes away when the workspace is renamed, or when it gets a second pane by a split, a new tab or a pane moved into it. The server then emits `workspace.updated` without the field. The field is left out when it is false, so a workspace the user opened, or a parent that was open already, never has it. The mark is kept in `orchestration.json`, so it survives a server restart and a live handoff.
+
 Two pane tokens have a meaning that any plugin can rely on. `label` is a short tag shown at the right edge of the pane's row. `link` is an `http` or `https` address that a sidebar opens for the row. Any source can write them with `pane.report_metadata`; tokens are one map for each pane, so the last write wins. The client's pane label dialog writes `label` under the source `herdr`, and an empty label clears it.
 
 Closing a tab or a workspace emits `pane.closed` for each pane in it, before `tab.closed` and `workspace.closed`.

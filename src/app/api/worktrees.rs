@@ -327,6 +327,7 @@ impl App {
                 worktree_membership(source, source.source_checkout_path.clone(), false);
             self.set_worktree_membership(ws_idx, membership, !created_parent);
             if created_parent && emit_created_event {
+                self.mark_opened_for_worktrees(ws_idx);
                 self.emit_workspace_open_events(ws_idx);
             }
         }

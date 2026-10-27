@@ -8,6 +8,7 @@ mod store;
 pub(crate) mod supervision;
 #[cfg(test)]
 mod tests;
+mod worktree_parents;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -90,6 +91,8 @@ pub(crate) struct Orchestration {
     next_tick: Option<Instant>,
     /// A person can type into a pane only while a client is attached.
     pub(crate) client_attached: bool,
+    /// Ids of the workspaces Herdr opened as the parent of a worktree and nobody took up yet.
+    pub(crate) opened_for_worktrees: std::collections::HashSet<String>,
     store_path: Option<PathBuf>,
     loaded: bool,
     dirty: bool,
@@ -115,6 +118,7 @@ impl Orchestration {
             jobs: JobTable::default(),
             next_tick: None,
             client_attached: true,
+            opened_for_worktrees: std::collections::HashSet::new(),
             store_path,
             loaded: false,
             dirty: false,
@@ -1111,12 +1115,25 @@ impl App {
             })
             .collect();
         tokens.sort_by(|a, b| a.pane_id.cmp(&b.pane_id));
+        let mut opened_for_worktrees: Vec<String> = self
+            .state
+            .workspaces
+            .iter()
+            .filter(|workspace| {
+                self.orchestration
+                    .opened_for_worktrees
+                    .contains(&workspace.id)
+            })
+            .map(|workspace| workspace.id.clone())
+            .collect();
+        opened_for_worktrees.sort();
         store::StoredState {
             version: 0,
             deliveries,
             links,
             jobs,
             tokens,
+            opened_for_worktrees,
         }
     }
 
@@ -1232,6 +1249,16 @@ impl App {
                 .collect();
             if state.metadata_tokens.patch(patch, None, now) {
                 state.revision = state.revision.saturating_add(1);
+            }
+        }
+        for workspace_id in stored.opened_for_worktrees {
+            if self
+                .state
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.id == workspace_id)
+            {
+                self.orchestration.opened_for_worktrees.insert(workspace_id);
             }
         }
         for job in stored.jobs {

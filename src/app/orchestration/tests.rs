@@ -1741,3 +1741,158 @@ async fn no_focus_hold_limit_holds_a_delivery_while_the_pane_is_focused() {
     f.tick();
     assert_eq!(typed(&mut f.supervisor_rx).await, "");
 }
+
+impl Fixture {
+    /// `opened_for_worktrees` as `workspace.get` and `workspace.list` report it.
+    fn opened_for_worktrees(&mut self, ws_idx: usize) -> (bool, bool) {
+        let workspace_id = self.app.public_workspace_id(ws_idx);
+        let get = self.app.handle_api_request(
+            serde_json::from_value(serde_json::json!({
+                "id": "req",
+                "method": "workspace.get",
+                "params": { "workspace_id": workspace_id },
+            }))
+            .unwrap(),
+        );
+        let get: serde_json::Value = serde_json::from_str(&get).unwrap();
+        let list = self.app.handle_api_request(
+            serde_json::from_value(serde_json::json!({
+                "id": "req",
+                "method": "workspace.list",
+                "params": {},
+            }))
+            .unwrap(),
+        );
+        let list: serde_json::Value = serde_json::from_str(&list).unwrap();
+        let listed = list["result"]["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|workspace| workspace["workspace_id"] == workspace_id.as_str())
+            .unwrap()["opened_for_worktrees"]
+            .clone();
+        (
+            get["result"]["workspace"]["opened_for_worktrees"] == true,
+            listed == true,
+        )
+    }
+
+    fn workspace_updates(&self) -> Vec<(String, bool)> {
+        self.app
+            .event_hub
+            .events_after(0)
+            .into_iter()
+            .filter_map(|(_, event)| match event.data {
+                EventData::WorkspaceUpdated { workspace } => {
+                    Some((workspace.workspace_id, workspace.opened_for_worktrees))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+#[tokio::test]
+async fn a_workspace_opened_for_worktrees_keeps_its_mark_until_it_is_renamed() {
+    let mut f = fixture();
+    assert_eq!(f.opened_for_worktrees(1), (false, false));
+    f.app.mark_opened_for_worktrees(1);
+    assert_eq!(f.opened_for_worktrees(1), (true, true));
+    assert_eq!(f.opened_for_worktrees(0), (false, false));
+
+    // The one pane Herdr opened does not clear it.
+    let pane = f.app.pane_info(1, f.worker).unwrap();
+    f.app.emit_event(EventEnvelope {
+        event: EventKind::PaneCreated,
+        data: EventData::PaneCreated { pane },
+    });
+    assert_eq!(f.opened_for_worktrees(1), (true, true));
+
+    let workspace_id = f.app.public_workspace_id(1);
+    let response = f.app.handle_api_request(
+        serde_json::from_value(serde_json::json!({
+            "id": "req",
+            "method": "workspace.rename",
+            "params": { "workspace_id": workspace_id, "label": "mine" },
+        }))
+        .unwrap(),
+    );
+    assert!(
+        serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+        "{response}"
+    );
+    assert_eq!(f.opened_for_worktrees(1), (false, false));
+    assert_eq!(f.workspace_updates(), vec![(workspace_id, false)]);
+}
+
+#[tokio::test]
+async fn a_workspace_opened_for_worktrees_loses_its_mark_with_a_second_pane() {
+    let mut f = fixture();
+    f.app.mark_opened_for_worktrees(1);
+    let second = f.app.state.workspaces[1].test_split(ratatui::layout::Direction::Horizontal);
+    f.app.state.ensure_test_terminals();
+    let pane = f.app.pane_info(1, second).unwrap();
+    f.app.emit_event(EventEnvelope {
+        event: EventKind::PaneCreated,
+        data: EventData::PaneCreated { pane },
+    });
+    assert_eq!(f.opened_for_worktrees(1), (false, false));
+    let events: Vec<EventKind> = f
+        .app
+        .event_hub
+        .events_after(0)
+        .into_iter()
+        .map(|(_, event)| event.event)
+        .collect();
+    assert_eq!(
+        events,
+        vec![EventKind::PaneCreated, EventKind::WorkspaceUpdated]
+    );
+}
+
+#[tokio::test]
+async fn a_closed_workspace_drops_its_mark() {
+    let mut f = fixture();
+    f.app.mark_opened_for_worktrees(1);
+    let workspace_id = f.app.public_workspace_id(1);
+    f.app.emit_event(EventEnvelope {
+        event: EventKind::WorkspaceClosed,
+        data: EventData::WorkspaceClosed {
+            workspace_id,
+            workspace: None,
+        },
+    });
+    assert!(f.app.orchestration.opened_for_worktrees.is_empty());
+    assert!(f.workspace_updates().is_empty());
+}
+
+#[tokio::test]
+async fn a_workspace_opened_for_worktrees_keeps_its_mark_across_the_state_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-orchestration-worktree-parents-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let path = dir.join(store::STORE_FILE);
+    let mut f = fixture();
+    f.app.orchestration = Orchestration::new(Some(path.clone()), 600);
+    f.app.mark_opened_for_worktrees(1);
+    f.app
+        .orchestration
+        .opened_for_worktrees
+        .insert("gone".into());
+    f.app.save_orchestration_now();
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        saved["opened_for_worktrees"],
+        serde_json::json!([f.app.public_workspace_id(1)])
+    );
+
+    f.app.orchestration = Orchestration::new(Some(path), 600);
+    f.app.ensure_orchestration_loaded();
+    assert_eq!(f.opened_for_worktrees(1), (true, true));
+    assert_eq!(f.opened_for_worktrees(0), (false, false));
+    assert_eq!(f.app.orchestration.opened_for_worktrees.len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}

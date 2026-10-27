@@ -22,6 +22,9 @@ pub(super) struct StoredState {
     pub(super) jobs: Vec<StoredJob>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(super) tokens: Vec<StoredTokens>,
+    /// Workspace ids, which also stay the same across a restore.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) opened_for_worktrees: Vec<String>,
 }
 
 /// The tokens of one pane that have no time limit.
@@ -107,6 +110,7 @@ impl StoredState {
             && self.links.is_empty()
             && self.jobs.is_empty()
             && self.tokens.is_empty()
+            && self.opened_for_worktrees.is_empty()
     }
 }
 
@@ -224,6 +228,7 @@ mod tests {
                 pane_id: "w2:p1".into(),
                 tokens: [("label".to_string(), "SRE-194".to_string())].into(),
             }],
+            opened_for_worktrees: vec!["w3".into()],
         }
     }
 

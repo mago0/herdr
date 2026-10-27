@@ -73,6 +73,10 @@ pub struct WorkspaceInfo {
     pub tokens: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorkspaceWorktreeInfo>,
+    /// Herdr opened this workspace as the parent of a worktree, and nobody has renamed it or
+    /// opened a second pane in it since.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub opened_for_worktrees: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

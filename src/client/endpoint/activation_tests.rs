@@ -148,6 +148,7 @@ fn workspace_focus_success(id: &str, workspace_id: &str) -> Vec<u8> {
                 agent_status: crate::api::schema::AgentStatus::Unknown,
                 tokens: Default::default(),
                 worktree: None,
+                opened_for_worktrees: false,
             },
         },
     })
