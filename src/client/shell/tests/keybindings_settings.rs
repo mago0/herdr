@@ -1423,7 +1423,7 @@ async fn sidebar_plugin_row_menu_sets_and_clears_the_label_of_its_agent_pane() {
     match &request.method {
         crate::api::schema::Method::PaneReportMetadata(params) => {
             assert_eq!(params.pane_id, "pane_1");
-            assert_eq!(params.source, "tree");
+            assert_eq!(params.source, "herdr");
             assert_eq!(params.tokens.get("label"), Some(&None));
         }
         other => panic!("pane metadata report, got {other:?}"),

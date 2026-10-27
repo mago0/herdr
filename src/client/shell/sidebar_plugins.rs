@@ -32,9 +32,9 @@ const PROGRAM_CHECK: Duration = Duration::from_millis(500);
 /// Start of the terminal title a plugin pane sets to name the row under a right-click.
 const MENU_TITLE_PREFIX: &str = "herdr-menu;";
 const MENU2_TITLE_PREFIX: &str = "herdr-menu2;";
-/// The pane token that holds a row label, and the metadata source it is reported under.
+/// The well-known pane token that holds a row label, and the Herdr-owned source that reports it.
 pub(super) const LABEL_TOKEN: &str = "label";
-pub(super) const LABEL_TOKEN_SOURCE: &str = "tree";
+pub(super) const LABEL_TOKEN_SOURCE: &str = "herdr";
 /// How long a right-click waits for the plugin pane to name its row.
 const MENU_REPLY_WINDOW: Duration = Duration::from_secs(1);
 /// The step a plugin pane reads as "focus the next row" and "focus the previous row": the keys

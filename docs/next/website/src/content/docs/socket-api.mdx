@@ -132,6 +132,8 @@ An agent record has four optional fields for this: `supervisor_pane_id`, `pendin
 
 Deliveries, links, jobs, and pane tokens with no time limit are kept in `orchestration.json` in the session directory, so they survive a server restart and a live handoff.
 
+Two pane tokens have a meaning that any plugin can rely on. `label` is a short tag shown at the right edge of the pane's row. `link` is an `http` or `https` address that a sidebar opens for the row. Any source can write them with `pane.report_metadata`; tokens are one map for each pane, so the last write wins. The client's pane label dialog writes `label` under the source `herdr`, and an empty label clears it.
+
 Closing a tab or a workspace emits `pane.closed` for each pane in it, before `tab.closed` and `workspace.closed`.
 
 `workspace.move_block` atomically moves the ordered `workspace_ids` before `before_workspace_id`; omit the anchor to move the block to the end. The ids must be unique and the anchor cannot be part of the block. The response contains the authoritative ordered workspace list.

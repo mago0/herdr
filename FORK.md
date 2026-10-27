@@ -7,6 +7,15 @@
 - **A sidebar section drawn by a plugin.** The client runs a plugin pane in place of the native spaces list or agents list. Config: `ui.sidebar.spaces.plugin` and `ui.sidebar.agents.plugin`, each `"<plugin id>:<pane id>"`. An empty value, or a plugin that is not installed, keeps the native section.
 - **Server support for agents that supervise agents.** Prompts that are typed only when a pane is safe (`herdr agent deliver`), commands that run on an interval, an event or a file change with no pane (`herdr job`), supervisor links with reports (`herdr pane supervise`), event history with a cursor (`herdr events read`), stall detection, and the text of the dialog a blocked agent shows. The socket API reference under `docs/next` describes each.
 
+## Well-known pane tokens
+
+Pane tokens are one map for each pane (`pane.report_metadata`). Two of them have a fixed meaning, so any plugin can write or read them:
+
+- `label`: a short tag shown at the right edge of the pane's row.
+- `link`: an `http` or `https` address that a sidebar opens for the row.
+
+The client's pane label dialog writes `label` under the source `herdr`. An empty label clears it.
+
 ## Sidebar tree
 
 The default for `ui.sidebar.spaces.plugin` is `herdr-tree:tree`: agents as a tree by supervisor. The plugin is not part of this repository. Install it once:
