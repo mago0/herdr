@@ -55,6 +55,16 @@ pub(super) fn terminal_erase_byte() -> Option<u8> {
     (erase != 0 && erase != 0xff).then_some(erase)
 }
 
+/// Whether the terminal behind `fd` reads input a line at a time (ICANON). A shell's line editor
+/// turns this off while it waits for a command; rc files run with it on.
+pub(crate) fn tty_reads_lines(fd: std::os::fd::RawFd) -> Option<bool> {
+    let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(fd, &mut termios) } != 0 {
+        return None;
+    }
+    Some(termios.c_lflag & libc::ICANON != 0)
+}
+
 pub(crate) fn poll_fd_readable(fd: std::os::fd::RawFd, timeout_ms: i32) -> std::io::Result<bool> {
     let mut descriptor = libc::pollfd {
         fd,

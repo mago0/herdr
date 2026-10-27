@@ -380,6 +380,11 @@ fn handle_connection_with_stop(
     let method = api_method_name(&request.method);
     let changes_ui = request_changes_ui(&request);
     crate::logging::api_request_started(&request_id, method, changes_ui);
+    let Some(request) =
+        crate::api::launch::prepare_agent_launch(request, &mut stream, api_tx, running)?
+    else {
+        return finish_wait_response(&mut stream, None, &request_id, method, changes_ui);
+    };
 
     match request.method {
         #[cfg(unix)]
@@ -761,6 +766,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::JobRemove(_) => "job.remove",
         Method::JobRun(_) => "job.run",
         Method::PaneSupervise(_) => "pane.supervise",
+        Method::PaneShellState(_) => "pane.shell_state",
     }
 }
 

@@ -1271,6 +1271,9 @@ impl App {
             Method::PaneSupervise(params) => {
                 return self.handle_pane_supervise(request.id, params);
             }
+            Method::PaneShellState(params) => {
+                return self.handle_pane_shell_state(request.id, params);
+            }
             Method::JobAdd(params) => return self.handle_job_add(request.id, params),
             Method::JobList(_) => return self.handle_job_list(request.id),
             Method::JobRemove(params) => return self.handle_job_remove(request.id, params),

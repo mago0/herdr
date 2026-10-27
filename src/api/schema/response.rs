@@ -291,6 +291,9 @@ pub enum ResponseResult {
     Delivery {
         delivery: super::deliveries::DeliveryInfo,
     },
+    PaneShellState {
+        shell: super::launch::PaneShellStateInfo,
+    },
     DeliveryList {
         deliveries: Vec<super::deliveries::DeliveryInfo>,
     },

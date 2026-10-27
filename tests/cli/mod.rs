@@ -4,6 +4,7 @@ mod agent_wait;
 mod agents;
 mod harness;
 mod hooks;
+mod launch;
 mod panes;
 mod plugins;
 mod protocol;

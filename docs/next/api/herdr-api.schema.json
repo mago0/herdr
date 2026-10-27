@@ -3559,6 +3559,17 @@
           ],
           "type": "object"
         },
+        "PaneShellStateParams": {
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id"
+          ],
+          "type": "object"
+        },
         "PaneSplitParams": {
           "properties": {
             "cwd": {
@@ -6504,6 +6515,22 @@
         {
           "properties": {
             "method": {
+              "const": "pane.shell_state",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneShellStateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.clear_agent_authority",
               "type": "string"
             },
@@ -9316,6 +9343,47 @@
           ],
           "type": "object"
         },
+        "PaneShellState": {
+          "oneOf": [
+            {
+              "const": "ready",
+              "description": "The pane's shell is the only foreground process and its line editor reads input.",
+              "type": "string"
+            },
+            {
+              "const": "starting",
+              "description": "The shell is still starting: it runs its startup files, or its line editor does not\nread input yet.",
+              "type": "string"
+            },
+            {
+              "const": "busy",
+              "description": "Another program runs in the foreground, or an agent owns the pane.",
+              "type": "string"
+            }
+          ]
+        },
+        "PaneShellStateInfo": {
+          "properties": {
+            "output_seq": {
+              "description": "Changes each time the pane prints output. Equal values in two reads mean no output came\nbetween them.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "state": {
+              "$ref": "#/schemas/success_response/$defs/PaneShellState"
+            }
+          },
+          "required": [
+            "pane_id",
+            "state",
+            "output_seq"
+          ],
+          "type": "object"
+        },
         "PaneSwapReason": {
           "enum": [
             "no_neighbor",
@@ -11340,6 +11408,22 @@
               "required": [
                 "type",
                 "delivery"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "shell": {
+                  "$ref": "#/schemas/success_response/$defs/PaneShellStateInfo"
+                },
+                "type": {
+                  "const": "pane_shell_state",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "shell"
               ],
               "type": "object"
             },

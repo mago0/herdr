@@ -3,6 +3,7 @@
 
 pub(crate) mod deliveries;
 pub(crate) mod jobs;
+pub(crate) mod launch;
 pub(crate) mod stall;
 mod store;
 pub(crate) mod supervision;

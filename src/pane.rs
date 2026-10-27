@@ -1560,6 +1560,15 @@ impl PaneRuntimeIo {
     }
 
     #[cfg(unix)]
+    fn tty_reads_lines(&self) -> Option<bool> {
+        match self {
+            PaneRuntimeIo::Actor(actor) => actor.tty_reads_lines(),
+            #[cfg(test)]
+            PaneRuntimeIo::TestChannel { .. } => None,
+        }
+    }
+
+    #[cfg(unix)]
     fn begin_handoff(&self, timeout: std::time::Duration) -> std::io::Result<()> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.begin_handoff(timeout),
@@ -3335,6 +3344,18 @@ impl PaneRuntime {
 
     pub(crate) fn content_seq(&self) -> u64 {
         self.content_seq.load(Ordering::Acquire)
+    }
+
+    /// Whether the pane's tty reads input a line at a time. None when it cannot be read.
+    pub(crate) fn tty_reads_lines(&self) -> Option<bool> {
+        #[cfg(unix)]
+        {
+            self.io.tty_reads_lines()
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
     }
 
     /// Resize if the dimensions actually changed.

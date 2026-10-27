@@ -1,5 +1,6 @@
 pub mod client;
 mod event_hub;
+mod launch;
 pub mod schema;
 mod server;
 mod status;

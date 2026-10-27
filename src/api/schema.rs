@@ -7,6 +7,7 @@ pub mod deliveries;
 pub mod events;
 pub mod integrations;
 pub mod jobs;
+pub mod launch;
 pub mod panes;
 pub mod plugins;
 pub mod response;
@@ -23,6 +24,7 @@ pub use deliveries::*;
 pub use events::*;
 pub use integrations::*;
 pub use jobs::*;
+pub use launch::*;
 pub use panes::*;
 pub use plugins::*;
 pub use response::*;
@@ -229,6 +231,8 @@ pub enum Method {
     PaneReportMetadata(PaneReportMetadataParams),
     #[serde(rename = "pane.supervise")]
     PaneSupervise(PaneSuperviseParams),
+    #[serde(rename = "pane.shell_state")]
+    PaneShellState(PaneShellStateParams),
     #[serde(rename = "pane.clear_agent_authority")]
     PaneClearAgentAuthority(PaneClearAgentAuthorityParams),
     #[serde(rename = "pane.release_agent")]
