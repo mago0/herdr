@@ -293,7 +293,7 @@ fn matched_rule_region_preview<'a>(
 
 fn agent_start(args: &[String]) -> std::io::Result<i32> {
     let Some(name) = args.first() else {
-        eprintln!("usage: herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]");
+        eprintln!("usage: herdr agent start <name> --kind KIND --pane ID [--timeout MS] [--prompt-file FILE] [-- <agent-args...>]");
         return Ok(2);
     };
     let separator = args
@@ -304,12 +304,27 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
     let mut pane_id = None;
     let mut timeout_ms = None;
     let mut link_supervisor = true;
+    let mut prompt = None;
     let mut index = 1;
     while index < separator {
         match args[index].as_str() {
             "--no-supervisor" => {
                 link_supervisor = false;
                 index += 1;
+            }
+            "--prompt-file" => {
+                let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
+                    eprintln!("missing value for --prompt-file");
+                    return Ok(2);
+                };
+                prompt = match super::launch::read_prompt_file(value) {
+                    Ok(text) => Some(text),
+                    Err(message) => {
+                        eprintln!("{message}");
+                        return Ok(2);
+                    }
+                };
+                index += 2;
             }
             "--kind" => {
                 let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
@@ -374,6 +389,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             pane_id,
             args: agent_args,
             timeout_ms,
+            prompt,
         }),
     })
 }
@@ -1010,10 +1026,10 @@ fn print_agent_help() {
     eprintln!("  herdr agent wait <target> [--until STATUS]... [--timeout MS]");
     eprintln!("  herdr agent attach <target> [--takeover]");
     eprintln!(
-        "  herdr agent start <name> --kind KIND --pane ID [--timeout MS] [--no-supervisor] [-- <agent-args...>]"
+        "  herdr agent start <name> --kind KIND --pane ID [--timeout MS] [--no-supervisor] [--prompt-file FILE] [-- <agent-args...>]"
     );
     eprintln!(
-        "  herdr agent resume <name> (--agent-session JSON | --kind KIND --session-id ID | --kind KIND --session-path PATH | --from TARGET) (--pane ID | --cwd DIR [--workspace ID]) [--timeout MS] [--no-supervisor] [-- <agent-args...>]"
+        "  herdr agent resume <name> (--agent-session JSON | --kind KIND --session-id ID | --kind KIND --session-path PATH | --from TARGET) (--pane ID | --cwd DIR [--workspace ID]) [--timeout MS] [--no-supervisor] [--prompt-file FILE] [-- <agent-args...>]"
     );
     eprintln!("  herdr agent deliver <target> <text> [--source NAME] [--ttl DURATION]");
     eprintln!("  herdr agent answer <target> <1-9> --dialog ID");

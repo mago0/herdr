@@ -1008,6 +1008,7 @@ impl App {
         self.sample_stalls(now);
         self.refresh_blockers();
         self.run_due_jobs(now);
+        self.drop_orphaned_launch_prompts();
         self.drain_deliveries();
         self.save_orchestration_if_dirty();
     }

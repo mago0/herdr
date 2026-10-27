@@ -1,13 +1,19 @@
-//! Agent launches that any tool can rely on: the shell state a launch waits for, and resuming a
-//! recorded agent session in a pane.
+//! Agent launches that any tool can rely on: the shell state a launch waits for, resuming a
+//! recorded agent session in a pane, and a first prompt queued with the launch.
 
 use crate::agent_resume::{AgentResumePlan, PersistedAgentSession};
 use crate::api::schema::{
-    AgentResumeParams, AgentSessionInfo, AgentSessionSpec, AgentStartParams, ErrorBody,
-    PaneShellState, PaneShellStateInfo, PaneShellStateParams, ResponseResult,
+    AgentInfo, AgentResumeParams, AgentSessionInfo, AgentSessionSpec, AgentStartParams,
+    DeliveryInfo, ErrorBody, PaneShellState, PaneShellStateInfo, PaneShellStateParams,
+    ResponseResult,
 };
 use crate::app::api::responses::{encode_error, encode_success};
 use crate::app::App;
+
+use super::MAX_DELIVERY_BYTES;
+
+/// The delivery source of a prompt queued with an agent launch.
+pub(crate) const LAUNCH_PROMPT_SOURCE: &str = "herdr:launch";
 
 /// Shells whose prompt reads input through a line editor. The editor turns off line-at-a-time
 /// input while it waits, so the tty mode tells startup apart from the prompt.
@@ -87,6 +93,26 @@ pub(crate) struct ResumeLaunch {
     pub(crate) kind: String,
     pub(crate) args: Vec<String>,
     pub(crate) session: PersistedAgentSession,
+}
+
+/// Checks a launch prompt before anything is typed, so a refused prompt starts nothing.
+pub(crate) fn check_launch_prompt(prompt: Option<&str>) -> Result<(), ErrorBody> {
+    let Some(prompt) = prompt else {
+        return Ok(());
+    };
+    if super::deliveries::sanitize(prompt).trim().is_empty() {
+        return Err(ErrorBody {
+            code: "empty_delivery".into(),
+            message: "prompt text must not be empty".into(),
+        });
+    }
+    if prompt.len() > MAX_DELIVERY_BYTES {
+        return Err(ErrorBody {
+            code: "delivery_too_large".into(),
+            message: format!("prompt text is limited to {MAX_DELIVERY_BYTES} bytes"),
+        });
+    }
+    Ok(())
 }
 
 fn encode_error_body(id: String, body: ErrorBody) -> String {
@@ -200,6 +226,53 @@ impl App {
         }
     }
 
+    /// Queues the first prompt of a launched agent. It is typed once the agent is ready.
+    pub(crate) fn queue_launch_prompt(
+        &mut self,
+        agent: &AgentInfo,
+        prompt: Option<String>,
+    ) -> Option<DeliveryInfo> {
+        let prompt = prompt?;
+        self.ensure_orchestration_loaded();
+        let terminal = self.terminal_of_target(&agent.terminal_id).ok()?;
+        match self.enqueue_delivery(terminal, prompt, Some(LAUNCH_PROMPT_SOURCE.into()), None) {
+            Ok((delivery, state)) => {
+                self.save_orchestration_if_dirty();
+                Some(self.delivery_info(&delivery, state))
+            }
+            Err(refusal) => {
+                tracing::warn!(reason = ?refusal, "launch prompt was not queued");
+                None
+            }
+        }
+    }
+
+    /// Drops launch prompts whose launch ended before the agent took them: the start failed,
+    /// or the agent exited, so the prompt is not typed into a later program.
+    pub(crate) fn drop_orphaned_launch_prompts(&mut self) {
+        let orphaned: Vec<String> = self
+            .orchestration
+            .deliveries
+            .iter()
+            .filter(|delivery| {
+                delivery.source.as_deref() == Some(LAUNCH_PROMPT_SOURCE)
+                    && self
+                        .state
+                        .terminals
+                        .get(&delivery.terminal)
+                        .is_none_or(|terminal| terminal.managed_agent_kind().is_none())
+            })
+            .map(|delivery| delivery.id.clone())
+            .collect();
+        for id in orphaned {
+            if let Some(delivery) = self.orchestration.deliveries.cancel(&id) {
+                tracing::info!(delivery = %id, "launch prompt dropped: its launch ended");
+                self.orchestration.dirty = true;
+                self.emit_delivery_changed(&delivery.terminal);
+            }
+        }
+    }
+
     /// The session that a pane or agent target records, in the shape `agent.get` reports.
     fn recorded_session(&self, target: &str) -> Result<AgentSessionSpec, ErrorBody> {
         let resolved = self
@@ -221,6 +294,9 @@ impl App {
     }
 
     pub(crate) fn handle_agent_resume(&mut self, id: String, params: AgentResumeParams) -> String {
+        if let Err(body) = check_launch_prompt(params.prompt.as_deref()) {
+            return encode_error_body(id, body);
+        }
         let spec = match (params.session, params.from.as_deref()) {
             (Some(spec), None) => spec,
             (None, Some(from)) => match self.recorded_session(from) {
@@ -252,6 +328,7 @@ impl App {
             pane_id,
             args: launch.args,
             timeout_ms: params.timeout_ms,
+            prompt: None,
         }) {
             Ok(started) => started,
             Err(err) => return encode_error_body(id, self.agent_start_error_body(err)),
@@ -265,6 +342,7 @@ impl App {
         let agent = self
             .agent_info_for_target(&agent.terminal_id)
             .unwrap_or(agent);
+        let delivery = self.queue_launch_prompt(&agent, params.prompt);
         let session = AgentSessionInfo {
             source: launch.session.source,
             agent: launch.session.agent,
@@ -277,6 +355,7 @@ impl App {
                 agent,
                 argv,
                 session,
+                delivery,
             },
         )
     }
@@ -408,5 +487,21 @@ mod tests {
         // A shell without a line editor reads lines at its prompt too.
         assert_eq!(idle_shell_state("dash", Some(true)), PaneShellState::Ready);
         assert_eq!(idle_shell_state("sh", Some(true)), PaneShellState::Ready);
+    }
+
+    #[test]
+    fn launch_prompts_follow_delivery_limits() {
+        assert!(check_launch_prompt(None).is_ok());
+        assert!(check_launch_prompt(Some("line one\nline two")).is_ok());
+        assert_eq!(
+            check_launch_prompt(Some(" \u{1b}\n")).unwrap_err().code,
+            "empty_delivery"
+        );
+        assert_eq!(
+            check_launch_prompt(Some(&"x".repeat(MAX_DELIVERY_BYTES + 1)))
+                .unwrap_err()
+                .code,
+            "delivery_too_large"
+        );
     }
 }

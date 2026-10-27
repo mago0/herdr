@@ -100,11 +100,17 @@ pub enum ResponseResult {
     AgentStarted {
         agent: AgentInfo,
         argv: Vec<String>,
+        /// The prompt queued with the start.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery: Option<super::deliveries::DeliveryInfo>,
     },
     AgentResumed {
         agent: AgentInfo,
         argv: Vec<String>,
         session: AgentSessionInfo,
+        /// The prompt queued with the resume.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivery: Option<super::deliveries::DeliveryInfo>,
     },
     AgentPrompted {
         agent: AgentInfo,

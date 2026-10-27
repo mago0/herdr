@@ -3,7 +3,7 @@
 use crate::agent_resume::AgentSessionRefKind;
 use crate::api::schema::{AgentResumeParams, AgentSessionSpec, Method};
 
-const RESUME_USAGE: &str = "usage: herdr agent resume <name> (--agent-session JSON | --kind KIND --session-id ID | --kind KIND --session-path PATH | --from TARGET) (--pane ID | --cwd DIR [--workspace ID]) [--timeout MS] [--no-supervisor] [-- <agent-args...>]";
+const RESUME_USAGE: &str = "usage: herdr agent resume <name> (--agent-session JSON | --kind KIND --session-id ID | --kind KIND --session-path PATH | --from TARGET) (--pane ID | --cwd DIR [--workspace ID]) [--timeout MS] [--no-supervisor] [--prompt-file FILE] [-- <agent-args...>]";
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct ResumeArgs {
@@ -15,6 +15,7 @@ struct ResumeArgs {
     workspace_id: Option<String>,
     timeout_ms: Option<u64>,
     link_supervisor: bool,
+    prompt: Option<String>,
     agent_args: Vec<String>,
 }
 
@@ -55,6 +56,7 @@ fn parse_resume_args(args: &[String]) -> Result<ResumeArgs, String> {
             "--pane" => parsed.pane_id = Some(super::normalize_pane_id(value)),
             "--cwd" => parsed.cwd = Some(value.clone()),
             "--workspace" => parsed.workspace_id = Some(value.clone()),
+            "--prompt-file" => parsed.prompt = Some(read_prompt_file(value)?),
             "--timeout" => {
                 parsed.timeout_ms = Some(
                     value
@@ -92,6 +94,17 @@ fn parse_resume_args(args: &[String]) -> Result<ResumeArgs, String> {
         parsed.workspace_id = caller_workspace_id();
     }
     Ok(parsed)
+}
+
+/// Reads the first prompt of a launch from a file, or from standard input for `-`.
+pub(super) fn read_prompt_file(path: &str) -> Result<String, String> {
+    let text = if path == "-" {
+        std::io::read_to_string(std::io::stdin())
+    } else {
+        std::fs::read_to_string(path)
+    }
+    .map_err(|err| format!("cannot read prompt file {path}: {err}"))?;
+    Ok(text.trim_end_matches(['\n', '\r']).to_string())
 }
 
 /// The workspace of the calling pane, where `--cwd` opens its tab by default.
@@ -146,6 +159,7 @@ pub(super) fn agent_resume(args: &[String]) -> std::io::Result<i32> {
             workspace_id: parsed.workspace_id,
             args: parsed.agent_args,
             timeout_ms: parsed.timeout_ms,
+            prompt: parsed.prompt,
         }),
     })
 }

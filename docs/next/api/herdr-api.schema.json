@@ -1568,6 +1568,13 @@
                 "null"
               ]
             },
+            "prompt": {
+              "description": "Text typed into the agent once it is ready for input, through the delivery queue.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "session": {
               "anyOf": [
                 {
@@ -1669,6 +1676,13 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "prompt": {
+              "description": "Text typed into the agent once it is ready for input, through the delivery queue.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "timeout_ms": {
               "description": "Startup timeout in milliseconds. Values must be greater than 3000 and at most 300000.",
@@ -10517,6 +10531,17 @@
                   },
                   "type": "array"
                 },
+                "delivery": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/DeliveryInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The prompt queued with the start."
+                },
                 "type": {
                   "const": "agent_started",
                   "type": "string"
@@ -10539,6 +10564,17 @@
                     "type": "string"
                   },
                   "type": "array"
+                },
+                "delivery": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/DeliveryInfo"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "The prompt queued with the resume."
                 },
                 "session": {
                   "$ref": "#/schemas/success_response/$defs/AgentSessionInfo"

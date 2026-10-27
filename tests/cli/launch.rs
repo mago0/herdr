@@ -453,3 +453,162 @@ fn pane_shell_state_reports_a_ready_shell_and_an_agent() {
 
     cleanup_spawned_herdr(fixture.herdr, fixture.base);
 }
+
+#[test]
+fn agent_start_types_the_prompt_file_once_the_agent_is_ready() {
+    let fixture = resume_fixture(&["pi"]);
+    let socket_path = &fixture.socket_path;
+    let prompt = fixture.base.join("task.md");
+    fs::write(&prompt, "Read task.md and do it.\n").unwrap();
+
+    let started = run_cli_json(
+        socket_path,
+        &[
+            "agent",
+            "start",
+            "worker",
+            "--kind",
+            "pi",
+            "--pane",
+            &fixture.pane_id,
+            "--prompt-file",
+            prompt.to_str().unwrap(),
+            "--",
+            "--no-session",
+        ],
+    );
+
+    assert_eq!(started["result"]["agent"]["interactive_ready"], true);
+    assert_eq!(started["result"]["delivery"]["source"], "herdr:launch");
+    assert_eq!(
+        started["result"]["delivery"]["text"],
+        "Read task.md and do it."
+    );
+    assert_eq!(
+        wait_for_file(&fixture.base.join("pi-prompts"), Duration::from_secs(8)),
+        "Read task.md and do it.\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.base.join("pi-args")).unwrap(),
+        "--no-session\n"
+    );
+
+    let empty = fixture.base.join("empty.md");
+    fs::write(&empty, "\n").unwrap();
+    let created = run_cli_json(
+        socket_path,
+        &["tab", "create", "--cwd", fixture.base.to_str().unwrap()],
+    );
+    let other = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
+    let refused = cli_error(&run_cli(
+        socket_path,
+        &[
+            "agent",
+            "start",
+            "other",
+            "--kind",
+            "pi",
+            "--pane",
+            other,
+            "--prompt-file",
+            empty.to_str().unwrap(),
+        ],
+    ));
+    assert_eq!(refused["error"]["code"], "empty_delivery");
+    let missing = run_cli(
+        socket_path,
+        &[
+            "agent",
+            "start",
+            "other",
+            "--kind",
+            "pi",
+            "--pane",
+            other,
+            "--prompt-file",
+            "/nonexistent/task.md",
+        ],
+    );
+    assert_eq!(missing.status.code(), Some(2));
+
+    cleanup_spawned_herdr(fixture.herdr, fixture.base);
+}
+
+#[test]
+fn agent_resume_over_the_socket_queues_its_prompt() {
+    let fixture = resume_fixture(&["claude"]);
+    let socket_path = &fixture.socket_path;
+
+    let resumed = socket_request(
+        socket_path,
+        serde_json::json!({
+            "id": "resume",
+            "method": "agent.resume",
+            "params": {
+                "name": "again",
+                "session": {"agent": "claude", "kind": "id", "value": "s-1"},
+                "pane_id": fixture.pane_id,
+                "prompt": "You were interrupted. Carry on."
+            }
+        }),
+    );
+    assert_eq!(resumed["result"]["type"], "agent_resumed", "{resumed}");
+    assert!(resumed["result"]["delivery"]["delivery_id"].is_string());
+    assert_eq!(
+        wait_for_file(
+            &fixture.base.join("claude-prompts"),
+            Duration::from_secs(10)
+        ),
+        "You were interrupted. Carry on.\n"
+    );
+
+    cleanup_spawned_herdr(fixture.herdr, fixture.base);
+}
+
+#[test]
+fn a_launch_prompt_is_dropped_when_its_launch_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = resume_fixture(&[]);
+    let socket_path = &fixture.socket_path;
+    let bin = fixture.base.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(bin.join("claude"), "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+    let prompt = fixture.base.join("task.md");
+    fs::write(&prompt, "never typed").unwrap();
+
+    let failed = run_cli(
+        socket_path,
+        &[
+            "agent",
+            "start",
+            "worker",
+            "--kind",
+            "claude",
+            "--pane",
+            &fixture.pane_id,
+            "--timeout",
+            "3100",
+            "--prompt-file",
+            prompt.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(failed.status.code(), Some(1), "{failed:?}");
+
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let queued = run_cli_json(socket_path, &["agent", "deliveries"]);
+        if queued["result"]["deliveries"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{queued}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    cleanup_spawned_herdr(fixture.herdr, fixture.base);
+}

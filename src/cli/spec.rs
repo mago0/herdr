@@ -507,6 +507,9 @@ fn agent_command() -> Command {
                 .arg(flag("no-supervisor").help(
                     "Do not record the calling pane as the supervisor of the new agent",
                 ))
+                .arg(path_option("prompt-file", "FILE").help(
+                    "Type this file's text into the agent once it is ready for input (- reads stdin)",
+                ))
                 .arg(
                     Arg::new("agent_args")
                         .value_name("AGENT_ARG")
@@ -546,6 +549,9 @@ fn agent_command() -> Command {
                 )
                 .arg(flag("no-supervisor").help(
                     "Do not record the calling pane as the supervisor of the resumed agent",
+                ))
+                .arg(path_option("prompt-file", "FILE").help(
+                    "Type this file's text into the agent once it is ready for input (- reads stdin)",
                 ))
                 .arg(
                     Arg::new("agent_args")

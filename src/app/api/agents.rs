@@ -76,13 +76,30 @@ impl App {
         encode_success(id, ResponseResult::AgentInfo { agent })
     }
 
-    pub(super) fn handle_agent_start(&mut self, id: String, params: AgentStartParams) -> String {
+    pub(super) fn handle_agent_start(
+        &mut self,
+        id: String,
+        mut params: AgentStartParams,
+    ) -> String {
+        let prompt = params.prompt.take();
+        if let Err(body) = crate::app::orchestration::launch::check_launch_prompt(prompt.as_deref())
+        {
+            return encode_error_body(id, body);
+        }
         let (agent, argv) = match self.start_agent(params) {
             Ok(started) => started,
             Err(err) => return encode_error_body(id, self.agent_start_error_body(err)),
         };
+        let delivery = self.queue_launch_prompt(&agent, prompt);
 
-        encode_success(id, ResponseResult::AgentStarted { agent, argv })
+        encode_success(
+            id,
+            ResponseResult::AgentStarted {
+                agent,
+                argv,
+                delivery,
+            },
+        )
     }
 
     pub(crate) fn handle_deferred_agent_api_request(
