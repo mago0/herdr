@@ -345,7 +345,9 @@ herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
 herdr agent wait <target> [--until STATUS]... [--timeout MS]
 herdr agent attach <target> [--takeover]
-herdr agent start <name> --kind KIND --pane ID [--timeout MS] [--no-supervisor] [-- <agent-args...>]
+herdr agent start <name> --kind KIND --pane ID [--timeout MS] [--no-supervisor] [--prompt-file FILE] [-- <agent-args...>]
+herdr agent resume <name> (--agent-session JSON | --kind KIND --session-id ID | --kind KIND --session-path PATH | --from TARGET) \
+  (--pane ID | --cwd DIR [--workspace ID]) [--timeout MS] [--no-supervisor] [--prompt-file FILE] [-- <agent-args...>]
 herdr agent deliver <target> <text> [--source NAME] [--ttl DURATION]
 herdr agent answer <target> <1-9> --dialog ID
 herdr agent deliveries [<target>]
@@ -358,7 +360,20 @@ Agent targets are either a unique live agent name or the pane ID that currently 
 
 `agent start` activates an existing available shell pane: the pane's interactive shell must own the foreground, with no foreground command, editor, or agent running. Topology must be created separately. Names are unique among live agents and must match `[a-z][a-z0-9_-]{0,31}`. The kind selects Herdr's canonical interactive executable, while arguments after `--` are passed to that executable. Supported kinds are `pi`, `claude`, `codex`, `gemini`, `cursor`, `devin`, `agy`, `cline`, `omp`, `mastracode`, `opencode`, `copilot`, `kimi`, `kiro`, `droid`, `amp`, `grok`, `hermes`, `kilo`, `qodercli`, `qwen`, `letta`, `maki`, and `muse`. A name follows the current pane occupant and is cleared when that agent exits, is released, or is replaced. Temporary detection uncertainty does not clear it.
 
+Before it types the command, `agent start` waits until the pane's shell can take a whole command line: the shell's line editor reads input and the pane has printed nothing for 200 ms, for at most 10 seconds. Text typed while the shell still runs its startup files can be read by a startup step, and the shell then runs the command without its first characters. A new pane needs no marker command or retry before `agent start`.
+
 A successful start returns only after the expected agent owns the same terminal and is ready for interactive input. If detection reports `blocked` during startup, the command returns `agent_not_ready` immediately. The name remains available for `agent read` and `agent send-keys`, and becomes ready for prompts after detection reports `idle`. The default startup timeout is 30000 milliseconds; explicit values must be greater than 3000 and no more than 300000.
+
+`agent resume` starts an agent again on a session it recorded, with Herdr's resume command for that agent. Name the session with `--agent-session JSON` (the `agent_session` object that `agent get` prints, or the whole `agent get` output), with `--kind KIND` and `--session-id ID` or `--session-path PATH`, or with `--from TARGET`, a pane or agent that still records one. The agent starts in `--pane ID`, a pane at its shell prompt, or in a new unfocused tab that `--cwd DIR` opens in `--workspace ID` (default: the calling pane's workspace). Arguments after `--` go into the resume command after the executable, or after its subcommand: `claude <args> --resume <id>`, `codex resume <args> <id>`, `pi <args> --session <path>`. Success, the timeout, the supervisor link and `--no-supervisor` work as for `agent start`, and the result also has `session` and `argv`. Kinds with a resume command: `claude`, `codex`, `copilot`, `devin`, `droid`, `kimi`, `mastracode`, `pi`, `omp`, `hermes`, `opencode`, `qodercli`, `qwen`, `kilo`, `cursor`, `agy`, `grok` and `letta`. Other kinds give `agent_resume_unsupported`; a session the agent cannot take gives `invalid_agent_session`.
+
+```bash
+# While the agent runs, keep its session.
+SESSION=$(herdr agent get worker | jq -c .result.agent.agent_session)
+# After it exits, start it again on the same conversation.
+herdr agent resume worker --agent-session "$SESSION" --cwd ~/src/repo/_worktrees/fix-auth -- --model opus
+```
+
+`--prompt-file FILE` on `agent start` and `agent resume` gives the agent its first prompt; `-` reads standard input. Herdr queues the text as a delivery with source `herdr:launch` and types it once the agent is ready and waits for input, the same way as `agent deliver`. The text can have many lines, up to 16 KiB; trailing line breaks are removed. The result has the delivery under `delivery`. The command returns when the agent is ready, which can be just before the prompt is typed. A prompt that is still queued when the launch fails, or when the agent exits, is dropped.
 
 `agent prompt` honors live bracketed-paste mode and writes text followed by delayed Enter as one ordered submission, including while the agent is working. Success without `--wait` acknowledges the writes, not the start of a turn. On Windows, Codex receives a paste boundary before Enter so submission does not depend on prompt size; the caller timeout includes submission time. If the agent is already `blocked`, it returns `agent_blocked` without sending input. With `--wait`, a prompt sent from another non-working state has up to five seconds after submission to produce an observed `working` or `blocked` state or Herdr returns `agent_prompt_stalled`; if the caller timeout expires first, Herdr returns the normal `timeout` error. This prevents unrelated `idle`, `done`, or session changes from completing the wait. After activity is observed, it waits for the first requested settled status. It does not track individual turns. If the agent is already working, completion of that active turn may satisfy the wait. `--until` narrows the matching states and is rejected unless `--wait` is also present. Standalone `agent wait` returns immediately when the current status matches. Both default to `idle`, `done`, or `blocked`; use `--until unknown` explicitly when needed.
 

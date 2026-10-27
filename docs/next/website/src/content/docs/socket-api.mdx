@@ -103,16 +103,48 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.supervise`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.supervise`, `pane.shell_state`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
-| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.deliver`, `agent.deliveries`, `agent.cancel_delivery`, `agent.answer`, `agent.view.set`, `agent.view.clear` |
+| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.resume`, `agent.deliver`, `agent.deliveries`, `agent.cancel_delivery`, `agent.answer`, `agent.view.set`, `agent.view.clear` |
 | Job | `job.add`, `job.list`, `job.run`, `job.remove` |
 | Events | `events.subscribe`, `events.wait`, `events.read` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
 
 `agent.wait` is server-owned and event-driven. It pins the resolved pane occupant so a replacement cannot satisfy the wait. `agent.prompt` accepts an optional `wait` object with `until` and `timeout_ms`; this submits the prompt and starts the wait in one request, avoiding a race between separate calls. If the resolved agent is already `blocked`, `agent.prompt` returns `agent_blocked` without sending input or starting the wait.
+
+### Agent launch: shell wait, resume and first prompt
+
+`agent.start` and `agent.resume` type a command into the pane's shell. Before they type, the server waits until the shell can take a whole command line: the shell is the only process in the foreground, its line editor reads input (the tty no longer reads a line at a time), and the pane has printed nothing for 200 ms. While the shell still runs its startup files, text typed into it can be read by a startup step, for example a terminal probe, and the shell then runs the command without its first characters. The wait lasts at most 10 seconds and at most `timeout_ms`; after that the launch goes ahead as before. A shell that has no line editor, such as `sh` or `dash`, needs only the 200 ms without output. The response comes after the wait, and `timeout_ms` still counts the agent's own start after it.
+
+`pane.shell_state` reports what the wait sees: `{ "pane_id": "w1:p2" }` returns `{ "type": "pane_shell_state", "shell": { "pane_id": "w1:p2", "state": "ready", "output_seq": 812 } }`. `state` is `ready` (the shell's line editor waits for a command), `starting` (the shell runs its startup files, or its line editor does not read yet) or `busy` (another program runs in the foreground, or an agent owns the pane). `output_seq` changes each time the pane prints output. An unknown pane gives `pane_not_found`.
+
+`agent.resume` starts an agent again on a session it recorded. Herdr builds the agent's own resume command, the same one it runs to restore a pane after a restart, and starts it like `agent.start`:
+
+```json
+{
+  "id": "1",
+  "method": "agent.resume",
+  "params": {
+    "name": "worker",
+    "session": { "agent": "claude", "kind": "id", "value": "8d1c...", "source": "herdr:claude" },
+    "pane_id": "w3:p1",
+    "args": ["--model", "opus", "--permission-mode", "acceptEdits"],
+    "timeout_ms": 60000,
+    "prompt": "You were interrupted. Read RESUME.md first."
+  }
+}
+```
+
+- `session` has the shape of `agent_session` in `agent.get`, `agent.list`, `pane.get` and `pane.list`. `source` is optional and defaults to Herdr's own integration source for the agent, such as `herdr:claude`. In place of `session`, `from` names a pane or agent that records a session, and the server reads it there.
+- `pane_id` is a pane at an interactive shell prompt. In place of `pane_id`, `cwd` opens a new unfocused tab with that working directory, in `workspace_id` or in the focused workspace.
+- `args` are native agent arguments. They go after the executable, or after its subcommand for an agent whose resume command has one: `claude --model opus --resume <id>`, `codex resume -m o3 <id>`, `pi --model x --session <path>`.
+- `name`, `timeout_ms` and the shell wait are the same as for `agent.start`.
+
+The result is `{ "type": "agent_resumed", "agent": { ... }, "argv": ["claude", "--model", "opus", "--resume", "8d1c..."], "session": { "source": "herdr:claude", "agent": "claude", "kind": "id", "value": "8d1c..." } }`. Like `agent.start`, it returns once the command is typed; wait for the agent with `agent.wait`. The pane records the session at once, so a server restart before the agent reports it resumes the same session. Herdr has resume commands for `claude`, `codex`, `copilot`, `devin`, `droid`, `kimi`, `mastracode`, `pi`, `omp`, `hermes`, `opencode`, `qodercli`, `qwen`, `kilo`, `cursor`, `agy`, `grok` and `letta`. Errors: `agent_resume_unsupported` for another kind, `invalid_agent_session` for a session value or kind that the agent cannot take (pi and omp take an absolute session path or an id, the others an id) or a `source` that is not Herdr's integration, `agent_session_not_found` when `from` records no session, `unsupported_agent_kind` for an unknown agent, and `invalid_request` when both or neither of `session` and `from`, or both `pane_id` and `cwd`, are given. Other errors are the ones of `agent.start`.
+
+`agent.start` and `agent.resume` take an optional `prompt`: the first prompt of the agent. The server checks it before it types the launch, with the limits of `agent.deliver` (`empty_delivery`, `delivery_too_large`), and then queues it as a delivery with source `herdr:launch`. The delivery queue types it once the agent is ready and waits for input, with the rules below. The result has the delivery in `delivery`. A launch prompt that is still queued when its launch fails, or when its agent exits, is dropped, so it is never typed into a later program.
 
 ### Deliveries, supervision, jobs and event history
 

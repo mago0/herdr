@@ -6,6 +6,15 @@
 
 - **A sidebar section drawn by a plugin.** The client runs a plugin pane in place of the native spaces list or agents list. Config: `ui.sidebar.spaces.plugin` and `ui.sidebar.agents.plugin`, each `"<plugin id>:<pane id>"`. An empty value, or a plugin that is not installed, keeps the native section.
 - **Server support for agents that supervise agents.** Prompts that are typed only when a pane is safe (`herdr agent deliver`), commands that run on an interval, an event or a file change with no pane (`herdr job`), supervisor links with reports (`herdr pane supervise`), event history with a cursor (`herdr events read`), stall detection, and the text of the dialog a blocked agent shows. The socket API reference under `docs/next` describes each.
+- **Agent launches that need no workaround.** `agent start` waits until a new pane's shell can take a whole command. `herdr agent resume` starts an agent again on a session it recorded. `--prompt-file` gives either one a first prompt. See below.
+
+## Agent launch
+
+Herdr types an agent's command into the pane's shell. Three things make that safe for a tool that starts or recovers agents:
+
+- **Shell wait.** `agent start` and `agent resume` wait until the shell's line editor reads input and the pane has printed nothing for 200 ms, for at most 10 seconds. Text typed while the shell still runs its startup files can be read by a startup step, such as a terminal probe, and the shell then runs `laude ...` in place of `claude ...`. `pane.shell_state` reports `ready`, `starting` or `busy`.
+- **Resume.** `herdr agent resume <name>` and `agent.resume` take a session as `agent get` reports it in `agent_session` (`--agent-session JSON`), a kind with `--session-id` or `--session-path`, or `--from` a pane that records one. Herdr builds the command with the same planner it uses to restore panes after a restart, for 18 agent kinds. Native arguments after `--` go into that command. The agent starts in `--pane`, or in a new tab that `--cwd` opens.
+- **First prompt.** `--prompt-file FILE` (or `prompt` on the socket) queues the text as a delivery with source `herdr:launch`. It is typed once the agent is ready, and dropped when the launch fails.
 
 ## Well-known pane tokens
 
