@@ -715,13 +715,27 @@ impl App {
         if dropped > 0 {
             self.orchestration.dirty = true;
         }
-        let kind = match kind {
+        let kind_name = match kind {
             SuperviseReport::Blocked => "blocked",
             SuperviseReport::Exited => "exited",
             SuperviseReport::Stalled => "stalled",
         };
-        let line = supervision::report_line(kind, &name, &pane_id, detail);
+        let line = supervision::report_line(kind_name, &name, &pane_id, detail);
+        let supervisor_pane_id = self
+            .public_pane_id_of_terminal(&link.supervisor)
+            .unwrap_or_default();
         self.enqueue_server_delivery(link.supervisor, line, SUPERVISE_SOURCE.to_string());
+        // The same report for jobs, plugin hooks and history readers.
+        self.emit_event(EventEnvelope {
+            event: EventKind::PaneSuperviseReport,
+            data: EventData::PaneSuperviseReport {
+                pane_id,
+                supervisor_pane_id,
+                agent: name,
+                kind,
+                detail: detail.map(str::to_owned),
+            },
+        });
     }
 
     /// Records what a newly blocked agent waits for and tells its supervisor.

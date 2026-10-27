@@ -140,6 +140,14 @@ impl App {
                     context
                 }),
             EventData::JobFinished { .. } => empty_plugin_context(correlation_id),
+            // An exited pane is gone, so its context names only the pane.
+            EventData::PaneSuperviseReport { pane_id, .. } => self
+                .plugin_context_for_public_pane_id(pane_id, correlation_id)
+                .unwrap_or_else(|| {
+                    let mut context = empty_plugin_context(correlation_id);
+                    context.focused_pane_id = Some(pane_id.clone());
+                    context
+                }),
             EventData::PaneCreated { pane } | EventData::PaneUpdated { pane } => {
                 self.plugin_context_for_pane_info(pane, correlation_id)
             }

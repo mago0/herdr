@@ -446,6 +446,32 @@ async fn empty_and_unknown_deliveries_are_refused() {
     );
 }
 
+/// One `pane.supervise_report` event: kind, pane, supervisor pane, agent and detail.
+type SuperviseReportEvent = (SuperviseReport, String, String, String, Option<String>);
+
+impl Fixture {
+    fn supervise_report_events(&self) -> Vec<SuperviseReportEvent> {
+        self.app
+            .event_hub
+            .events_after(0)
+            .into_iter()
+            .filter_map(|(_, event)| match (event.event, event.data) {
+                (
+                    EventKind::PaneSuperviseReport,
+                    EventData::PaneSuperviseReport {
+                        pane_id,
+                        supervisor_pane_id,
+                        agent,
+                        kind,
+                        detail,
+                    },
+                ) => Some((kind, pane_id, supervisor_pane_id, agent, detail)),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 #[tokio::test]
 async fn a_supervisor_is_told_once_when_its_worker_blocks_with_what_the_worker_shows() {
     let mut f = fixture();
@@ -469,10 +495,20 @@ async fn a_supervisor_is_told_once_when_its_worker_blocks_with_what_the_worker_s
         f.agent(1, f.worker).blocker.as_deref(),
         Some("Do you want to run this command? / 1. Yes / 2. No")
     );
+    let lead_pane = f.app.public_pane_id(0, f.supervisor).unwrap();
+    let blocked = (
+        SuperviseReport::Blocked,
+        worker_pane.clone(),
+        lead_pane,
+        "worker".to_owned(),
+        Some("Do you want to run this command? / 1. Yes / 2. No".to_owned()),
+    );
+    assert_eq!(f.supervise_report_events(), vec![blocked.clone()]);
 
     f.worker_state(AgentState::Blocked);
     f.tick();
     assert_eq!(typed(&mut f.supervisor_rx).await, "");
+    assert_eq!(f.supervise_report_events(), vec![blocked]);
 
     f.worker_state(AgentState::Working);
     assert_eq!(f.agent(1, f.worker).blocker, None);
@@ -519,12 +555,23 @@ async fn a_supervisor_is_told_when_the_pane_of_its_worker_closes() {
     let worker_pane = f.app.public_pane_id(1, f.worker).unwrap();
     f.tick();
 
+    let lead_pane = f.app.public_pane_id(0, f.supervisor).unwrap();
     f.app.state.workspaces.remove(1);
     f.app.state.active = None;
     f.tick();
     assert_eq!(
         typed(&mut f.supervisor_rx).await,
         format!("HERDR|exited|worker|{worker_pane}\r")
+    );
+    assert_eq!(
+        f.supervise_report_events(),
+        vec![(
+            SuperviseReport::Exited,
+            worker_pane.clone(),
+            lead_pane,
+            "worker".to_owned(),
+            None,
+        )]
     );
     assert!(f.app.orchestration.links.is_empty());
     f.tick();
@@ -653,6 +700,16 @@ async fn a_working_agent_with_a_still_screen_is_marked_stalled_and_reported() {
         })
         .collect::<Vec<_>>();
     assert_eq!(stalled, vec![(true, 600)]);
+    assert_eq!(
+        f.supervise_report_events(),
+        vec![(
+            SuperviseReport::Stalled,
+            worker_pane.clone(),
+            f.app.public_pane_id(0, f.supervisor).unwrap(),
+            "worker".to_owned(),
+            Some("600".to_owned()),
+        )]
+    );
 
     f.app
         .lookup_runtime_sender(1, f.worker)
@@ -810,6 +867,54 @@ async fn a_job_runs_on_an_event_and_gets_its_name_and_data() {
     assert_eq!(
         typed(&mut f.supervisor_rx).await,
         format!("on-status pane.agent_status_changed {lead_pane}\r")
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_runs_on_a_supervise_report_and_gets_its_fields() {
+    let out = std::env::temp_dir().join(format!(
+        "herdr-orchestration-report-{}-{}.json",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let mut f = fixture();
+    f.app.state.active = Some(1);
+    f.supervise(vec![SuperviseReport::Blocked]);
+    f.add_job(JobAddParams {
+        every_ms: None,
+        on_events: vec!["pane.supervise_report".into()],
+        target: None,
+        ..job(
+            "on-report",
+            &format!(
+                "printf '%s' \"$HERDR_JOB_EVENT_JSON\" > '{}'",
+                out.display()
+            ),
+        )
+    });
+    f.tick();
+    f.app
+        .lookup_runtime_sender(1, f.worker)
+        .unwrap()
+        .test_process_pty_bytes(b"Trust this folder?\r\n  1. Yes\r\n  2. No\r\n");
+    f.worker_state(AgentState::Blocked);
+    f.wait_for_runs("on-report", 1).await;
+
+    let event: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    let _ = std::fs::remove_file(&out);
+    assert_eq!(event["event"], "pane_supervise_report");
+    assert_eq!(
+        event["data"],
+        serde_json::json!({
+            "type": "pane_supervise_report",
+            "pane_id": f.app.public_pane_id(1, f.worker).unwrap(),
+            "supervisor_pane_id": f.app.public_pane_id(0, f.supervisor).unwrap(),
+            "agent": "worker",
+            "kind": "blocked",
+            "detail": "Trust this folder? / 1. Yes / 2. No",
+        })
     );
 }
 

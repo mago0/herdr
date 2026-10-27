@@ -239,6 +239,7 @@ pub enum EventKind {
     LayoutUpdated,
     PaneDeliveryChanged,
     PaneAgentStalled,
+    PaneSuperviseReport,
     JobFinished,
 }
 
@@ -273,6 +274,7 @@ impl EventKind {
             EventKind::LayoutUpdated => "layout.updated",
             EventKind::PaneDeliveryChanged => "pane.delivery_changed",
             EventKind::PaneAgentStalled => "pane.agent_stalled",
+            EventKind::PaneSuperviseReport => "pane.supervise_report",
             EventKind::JobFinished => "job.finished",
         }
     }
@@ -307,6 +309,7 @@ pub const KNOWN_EVENT_KINDS: &[EventKind] = &[
     EventKind::LayoutUpdated,
     EventKind::PaneDeliveryChanged,
     EventKind::PaneAgentStalled,
+    EventKind::PaneSuperviseReport,
     EventKind::JobFinished,
 ];
 
@@ -335,6 +338,7 @@ pub const PLUGIN_HOOK_EVENT_KINDS: &[EventKind] = &[
     EventKind::PaneAgentStatusChanged,
     EventKind::PaneDeliveryChanged,
     EventKind::PaneAgentStalled,
+    EventKind::PaneSuperviseReport,
 ];
 
 /// Every event name, for callers that filter history by name.
@@ -604,6 +608,15 @@ pub enum EventData {
         workspace_id: String,
         stalled: bool,
         quiet_secs: u64,
+    },
+    /// A report about a supervised pane, sent to its supervisor as a `HERDR|<kind>|...` line.
+    PaneSuperviseReport {
+        pane_id: String,
+        supervisor_pane_id: String,
+        agent: String,
+        kind: super::panes::SuperviseReport,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
     },
     JobFinished {
         name: String,

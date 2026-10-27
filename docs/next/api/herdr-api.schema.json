@@ -788,6 +788,41 @@
               "type": "object"
             },
             {
+              "description": "A report about a supervised pane, sent to its supervisor as a `HERDR|<kind>|...` line.",
+              "properties": {
+                "agent": {
+                  "type": "string"
+                },
+                "detail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "$ref": "#/schemas/event/$defs/SuperviseReport"
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "supervisor_pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "pane_supervise_report",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "supervisor_pane_id",
+                "agent",
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
               "properties": {
                 "exit": {
                   "format": "int32",
@@ -846,6 +881,7 @@
             "layout_updated",
             "pane_delivery_changed",
             "pane_agent_stalled",
+            "pane_supervise_report",
             "job_finished"
           ],
           "type": "string"
@@ -1125,6 +1161,14 @@
           "enum": [
             "right",
             "down"
+          ],
+          "type": "string"
+        },
+        "SuperviseReport": {
+          "enum": [
+            "blocked",
+            "exited",
+            "stalled"
           ],
           "type": "string"
         },
@@ -8088,6 +8132,41 @@
               "type": "object"
             },
             {
+              "description": "A report about a supervised pane, sent to its supervisor as a `HERDR|<kind>|...` line.",
+              "properties": {
+                "agent": {
+                  "type": "string"
+                },
+                "detail": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "$ref": "#/schemas/success_response/$defs/SuperviseReport"
+                },
+                "pane_id": {
+                  "type": "string"
+                },
+                "supervisor_pane_id": {
+                  "type": "string"
+                },
+                "type": {
+                  "const": "pane_supervise_report",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pane_id",
+                "supervisor_pane_id",
+                "agent",
+                "kind"
+              ],
+              "type": "object"
+            },
+            {
               "properties": {
                 "exit": {
                   "format": "int32",
@@ -8161,6 +8240,7 @@
             "layout_updated",
             "pane_delivery_changed",
             "pane_agent_stalled",
+            "pane_supervise_report",
             "job_finished"
           ],
           "type": "string"
@@ -11449,6 +11529,14 @@
           "enum": [
             "right",
             "down"
+          ],
+          "type": "string"
+        },
+        "SuperviseReport": {
+          "enum": [
+            "blocked",
+            "exited",
+            "stalled"
           ],
           "type": "string"
         },
