@@ -69,7 +69,7 @@ pub(crate) enum ResumeRefusal {
 }
 
 impl ResumeRefusal {
-    fn body(&self) -> ErrorBody {
+    pub(crate) fn body(&self) -> ErrorBody {
         match self {
             ResumeRefusal::UnknownKind(agent) => ErrorBody {
                 code: "unsupported_agent_kind".into(),

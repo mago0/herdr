@@ -339,6 +339,24 @@ fn agent_resume_refuses_sessions_it_cannot_resume_before_typing() {
     ));
     assert_eq!(none["error"]["code"], "agent_session_not_found");
 
+    let tabs_before = run_cli_json(socket_path, &["tab", "list"]);
+    let no_tab = cli_error(&run_cli(
+        socket_path,
+        &[
+            "agent",
+            "resume",
+            "w",
+            "--kind",
+            "gemini",
+            "--session-id",
+            "x",
+            "--cwd",
+            "/tmp",
+        ],
+    ));
+    assert_eq!(no_tab["error"]["code"], "agent_resume_unsupported");
+    assert_eq!(run_cli_json(socket_path, &["tab", "list"]), tabs_before);
+
     let usage = run_cli(socket_path, &["agent", "resume", "w", "--pane", pane]);
     assert_eq!(usage.status.code(), Some(2));
     assert!(!fixture.base.join("claude-args").exists());

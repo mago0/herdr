@@ -12,6 +12,7 @@ use crate::api::server::{
     dispatch_to_app_with_timeout, should_stop_connection, APP_RESPONSE_TIMEOUT,
 };
 use crate::api::ApiRequestSender;
+use crate::app::orchestration::launch::{check_launch_prompt, plan_resume};
 use crate::ipc::LocalStream;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -51,6 +52,20 @@ pub(super) fn prepare_agent_launch(
                 }
                 (Some(pane_id), None) => pane_id,
                 (None, Some(cwd)) => {
+                    // A resume that cannot start opens no tab.
+                    let refused = params
+                        .session
+                        .as_ref()
+                        .and_then(|spec| plan_resume(spec, &params.args).err())
+                        .map(|refusal| refusal.body())
+                        .or_else(|| check_launch_prompt(params.prompt.as_deref()).err());
+                    if let Some(body) = refused {
+                        return Ok(Prepared::Reply(error_reply(
+                            &request.id,
+                            &body.code,
+                            &body.message,
+                        )));
+                    }
                     match open_tab(&request.id, cwd, params.workspace_id.clone(), api_tx) {
                         Ok(pane_id) => {
                             params.pane_id = Some(pane_id.clone());
