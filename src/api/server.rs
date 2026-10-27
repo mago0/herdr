@@ -380,11 +380,22 @@ fn handle_connection_with_stop(
     let method = api_method_name(&request.method);
     let changes_ui = request_changes_ui(&request);
     crate::logging::api_request_started(&request_id, method, changes_ui);
-    let Some(request) =
-        crate::api::launch::prepare_agent_launch(request, &mut stream, api_tx, running)?
-    else {
-        return finish_wait_response(&mut stream, None, &request_id, method, changes_ui);
-    };
+    let request =
+        match crate::api::launch::prepare_agent_launch(request, &mut stream, api_tx, running)? {
+            crate::api::launch::Prepared::Request(request) => *request,
+            crate::api::launch::Prepared::Reply(reply) => {
+                return finish_wait_response(
+                    &mut stream,
+                    Some(reply),
+                    &request_id,
+                    method,
+                    changes_ui,
+                )
+            }
+            crate::api::launch::Prepared::Disconnected => {
+                return finish_wait_response(&mut stream, None, &request_id, method, changes_ui)
+            }
+        };
 
     match request.method {
         #[cfg(unix)]
@@ -699,6 +710,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::AgentViewClear(_) => "agent.view.clear",
         Method::AgentFocus(_) => "agent.focus",
         Method::AgentStart(_) => "agent.start",
+        Method::AgentResume(_) => "agent.resume",
         Method::AgentPrompt(_) => "agent.prompt",
         Method::AgentWait(_) => "agent.wait",
         Method::PaneSplit(_) => "pane.split",

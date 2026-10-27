@@ -518,6 +518,46 @@ fn agent_command() -> Command {
                 ),
         )
         .subcommand(
+            Command::new("resume")
+                .about("Start an agent again on a session it recorded")
+                .override_usage(
+                    "herdr agent resume <NAME> (--agent-session JSON | --kind <KIND> --session-id <ID> | --kind <KIND> --session-path <PATH> | --from <TARGET>) (--pane <ID> | --cwd <DIR> [--workspace <ID>]) [OPTIONS] [-- [AGENT_ARG]...]",
+                )
+                .arg(required("name", "NAME"))
+                .arg(option("agent-session", "JSON").help(
+                    "The session as agent get reports it in agent_session, or the whole agent get output",
+                ))
+                .arg(
+                    option("kind", "KIND")
+                        .value_parser(agent_kind_values())
+                        .help("Agent kind of --session-id or --session-path"),
+                )
+                .arg(option("session-id", "ID").help("Native session id"))
+                .arg(option("session-path", "PATH").help("Native session file (pi, omp)"))
+                .arg(option("from", "TARGET").help("Pane or agent whose recorded session to resume"))
+                .arg(option("pane", "ID").help("Existing pane at an interactive shell prompt"))
+                .arg(option("cwd", "DIR").help("Open a new unfocused tab here for the agent"))
+                .arg(option("workspace", "ID").help(
+                    "Workspace of the tab that --cwd opens (default: the calling pane's workspace)",
+                ))
+                .arg(
+                    option("timeout", "MS")
+                        .help("Wait for interactive readiness (default: 30000; max: 300000)"),
+                )
+                .arg(flag("no-supervisor").help(
+                    "Do not record the calling pane as the supervisor of the resumed agent",
+                ))
+                .arg(
+                    Arg::new("agent_args")
+                        .value_name("AGENT_ARG")
+                        .num_args(0..)
+                        .last(true),
+                )
+                .after_help(
+                    "Herdr builds the agent's own resume command from the session. Arguments after -- go in that command, such as a model or permission mode. Success means the expected agent was detected in the same terminal and is ready for input.",
+                ),
+        )
+        .subcommand(
             Command::new("explain")
                 .about("Explain agent detection state")
                 .arg(Arg::new("target").value_name("TARGET"))

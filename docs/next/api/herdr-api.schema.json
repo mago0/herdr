@@ -1535,6 +1535,72 @@
           ],
           "type": "object"
         },
+        "AgentResumeParams": {
+          "properties": {
+            "args": {
+              "description": "Native agent arguments added to the resume command, such as a model or permission mode.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "cwd": {
+              "description": "Opens a new tab with this working directory for the agent.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "from": {
+              "description": "A pane or agent whose recorded session to resume.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "type": "string"
+            },
+            "pane_id": {
+              "description": "A pane at an interactive shell prompt. Give this or `cwd`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "session": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/AgentSessionSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The session to resume. Give this or `from`."
+            },
+            "timeout_ms": {
+              "description": "Startup timeout in milliseconds. Values must be greater than 3000 and at most 300000.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "description": "The workspace of the tab that `cwd` opens. Defaults to the focused workspace.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
         "AgentSendKeysParams": {
           "properties": {
             "keys": {
@@ -1550,6 +1616,40 @@
           "required": [
             "target",
             "keys"
+          ],
+          "type": "object"
+        },
+        "AgentSessionRefKind": {
+          "enum": [
+            "id",
+            "path"
+          ],
+          "type": "string"
+        },
+        "AgentSessionSpec": {
+          "description": "A recorded agent session, in the shape `agent.get` reports as `agent_session`.",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/request/$defs/AgentSessionRefKind"
+            },
+            "source": {
+              "description": "Defaults to Herdr's own integration source for the agent, such as `herdr:claude`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "agent",
+            "kind",
+            "value"
           ],
           "type": "object"
         },
@@ -5784,6 +5884,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentStartParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.resume",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentResumeParams"
             }
           },
           "required": [
@@ -10410,6 +10526,33 @@
                 "type",
                 "agent",
                 "argv"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "agent": {
+                  "$ref": "#/schemas/success_response/$defs/AgentInfo"
+                },
+                "argv": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "session": {
+                  "$ref": "#/schemas/success_response/$defs/AgentSessionInfo"
+                },
+                "type": {
+                  "const": "agent_resumed",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "agent",
+                "argv",
+                "session"
               ],
               "type": "object"
             },

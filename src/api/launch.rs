@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::api::schema::{
-    Method, PaneShellState, PaneShellStateInfo, PaneShellStateParams, Request,
+    Method, PaneShellState, PaneShellStateInfo, PaneShellStateParams, Request, TabCreateParams,
 };
 use crate::api::server::{
     dispatch_to_app_with_timeout, should_stop_connection, APP_RESPONSE_TIMEOUT,
@@ -22,35 +22,102 @@ const SETTLE: Duration = Duration::from_millis(200);
 const MAX_WAIT: Duration = Duration::from_secs(10);
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
+/// What the connection does after the launch wait.
+pub(super) enum Prepared {
+    Request(Box<Request>),
+    /// The launch failed before it reached the app, for example a tab that did not open.
+    Reply(String),
+    Disconnected,
+}
+
 /// Waits, for an agent launch request, until its pane's shell is ready. Other requests pass.
-/// None when the client went away while it waited.
+/// A resume with `cwd` and no pane first opens a tab for it.
 pub(super) fn prepare_agent_launch(
-    request: Request,
+    mut request: Request,
     stream: &mut LocalStream,
     api_tx: &ApiRequestSender,
     running: &Arc<AtomicBool>,
-) -> std::io::Result<Option<Request>> {
-    let (pane_id, timeout_ms) = match &request.method {
+) -> std::io::Result<Prepared> {
+    let (pane_id, timeout_ms) = match &mut request.method {
         Method::AgentStart(params) => (params.pane_id.clone(), params.timeout_ms),
-        _ => return Ok(Some(request)),
+        Method::AgentResume(params) => {
+            let pane_id = match (params.pane_id.clone(), params.cwd.take()) {
+                (Some(_), Some(_)) => {
+                    return Ok(Prepared::Reply(error_reply(
+                        &request.id,
+                        "invalid_request",
+                        "agent.resume takes pane_id or cwd, not both",
+                    )))
+                }
+                (Some(pane_id), None) => pane_id,
+                (None, Some(cwd)) => {
+                    match open_tab(&request.id, cwd, params.workspace_id.clone(), api_tx) {
+                        Ok(pane_id) => {
+                            params.pane_id = Some(pane_id.clone());
+                            pane_id
+                        }
+                        Err(reply) => return Ok(Prepared::Reply(reply)),
+                    }
+                }
+                (None, None) => return Ok(Prepared::Request(Box::new(request))),
+            };
+            (pane_id, params.timeout_ms)
+        }
+        _ => return Ok(Prepared::Request(Box::new(request))),
     };
     let limit = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)).min(MAX_WAIT);
     let deadline = Instant::now() + limit;
     let mut settle = Settle::default();
     loop {
         if should_stop_connection(stream, running)? {
-            return Ok(None);
+            return Ok(Prepared::Disconnected);
         }
         let Some(shell) = shell_state(&request.id, &pane_id, api_tx) else {
             // The launch itself reports a pane that is gone.
-            return Ok(Some(request));
+            return Ok(Prepared::Request(Box::new(request)));
         };
         let now = Instant::now();
         if settle.observe(&shell, now) || now >= deadline {
-            return Ok(Some(request));
+            return Ok(Prepared::Request(Box::new(request)));
         }
         std::thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn error_reply(request_id: &str, code: &str, message: &str) -> String {
+    serde_json::json!({
+        "id": request_id,
+        "error": { "code": code, "message": message },
+    })
+    .to_string()
+}
+
+/// Opens an unfocused tab in `cwd` and returns its root pane.
+fn open_tab(
+    request_id: &str,
+    cwd: String,
+    workspace_id: Option<String>,
+    api_tx: &ApiRequestSender,
+) -> Result<String, String> {
+    let response = dispatch_to_app_with_timeout(
+        Request {
+            id: request_id.to_string(),
+            method: Method::TabCreate(TabCreateParams {
+                workspace_id,
+                cwd: Some(cwd),
+                focus: false,
+                label: None,
+                env: Default::default(),
+            }),
+        },
+        api_tx,
+        Some(APP_RESPONSE_TIMEOUT),
+    );
+    let value: serde_json::Value = serde_json::from_str(&response).map_err(|_| response.clone())?;
+    value["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or(response)
 }
 
 fn shell_state(

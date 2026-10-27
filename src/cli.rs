@@ -26,6 +26,7 @@ mod agent;
 mod api;
 mod completion;
 mod integration;
+mod launch;
 mod machine;
 mod notification;
 mod orchestration;

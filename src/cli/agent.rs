@@ -26,6 +26,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "wait" => agent_wait(&args[1..]),
         "attach" => agent_attach(&args[1..]),
         "start" => agent_start(&args[1..]),
+        "resume" => super::launch::agent_resume(&args[1..]),
         "answer" => super::orchestration::agent_answer(&args[1..]),
         "deliver" => super::orchestration::agent_deliver(&args[1..]),
         "deliveries" => super::orchestration::agent_deliveries(&args[1..]),
@@ -361,18 +362,60 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
     } else {
         Vec::new()
     };
+    launch_agent(AgentLaunch {
+        name: name.clone(),
+        pane_id: Some(pane_id.clone()),
+        expected_kind: Some(expected_kind),
+        timeout_ms,
+        link_supervisor,
+        method: Method::AgentStart(AgentStartParams {
+            name: name.clone(),
+            kind,
+            pane_id,
+            args: agent_args,
+            timeout_ms,
+        }),
+    })
+}
+
+/// An agent launch request and how the CLI waits for its agent.
+pub(super) struct AgentLaunch {
+    pub(super) name: String,
+    /// The pane the launch types into, when the caller names it.
+    pub(super) pane_id: Option<String>,
+    /// The agent kind to wait for. Without it, the kind of the resumed session.
+    pub(super) expected_kind: Option<String>,
+    pub(super) timeout_ms: Option<u64>,
+    pub(super) link_supervisor: bool,
+    pub(super) method: Method,
+}
+
+pub(super) fn launch_agent(launch: AgentLaunch) -> std::io::Result<i32> {
+    let AgentLaunch {
+        name,
+        pane_id,
+        expected_kind,
+        timeout_ms,
+        link_supervisor,
+        method,
+    } = launch;
+    let name = &name;
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000));
     let retryable_timeout = timeout > crate::app::AGENT_START_SETTLE_DELAY
         && timeout <= crate::app::MAX_AGENT_START_TIMEOUT;
-    let pinned_terminal_id = pane_terminal_id(&pane_id)?;
+    let pinned_terminal_id = match pane_id.as_deref() {
+        Some(pane_id) => pane_terminal_id(pane_id)?,
+        None => None,
+    };
     let mut retry_deadline = None;
     let mut previous_busy_response = None;
     let mut response = loop {
         if let Some(previous_busy_response) = previous_busy_response.as_ref() {
             let retry_expired = retry_deadline.is_some_and(|deadline| Instant::now() >= deadline);
+            let pane_id = pane_id.as_deref().unwrap_or_default();
             if retry_expired
-                || pane_terminal_id(&pane_id)? != pinned_terminal_id
-                || !pane_shell_is_initializing(&pane_id)?
+                || pane_terminal_id(pane_id)? != pinned_terminal_id
+                || !pane_shell_is_initializing(pane_id)?
             {
                 return super::print_response(previous_busy_response);
             }
@@ -380,22 +423,17 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
 
         let response = super::send_request(&Request {
             id: "cli:agent:start".into(),
-            method: Method::AgentStart(AgentStartParams {
-                name: name.clone(),
-                kind: kind.clone(),
-                pane_id: pane_id.clone(),
-                args: agent_args.clone(),
-                timeout_ms,
-            }),
+            method: method.clone(),
         })?;
         if response.get("error").is_none() {
             break response;
         }
+        let busy_pane = pane_id.as_deref().unwrap_or_default();
         if response["error"]["code"].as_str() != Some("agent_pane_busy")
             || !retryable_timeout
             || pinned_terminal_id.is_none()
-            || pane_terminal_id(&pane_id)? != pinned_terminal_id
-            || !pane_shell_is_initializing(&pane_id)?
+            || pane_terminal_id(busy_pane)? != pinned_terminal_id
+            || !pane_shell_is_initializing(busy_pane)?
         {
             return super::print_response(&response);
         }
@@ -425,6 +463,24 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
     {
         return super::print_response(&agent_name_lost_error("cli:agent:start", name));
     }
+    let pane_id = pane_id
+        .or_else(|| {
+            response["result"]["agent"]["pane_id"]
+                .as_str()
+                .map(str::to_owned)
+        })
+        .unwrap_or_default();
+    let Some(expected_kind) = expected_kind.or_else(|| {
+        response["result"]["session"]["agent"]
+            .as_str()
+            .map(str::to_owned)
+    }) else {
+        return super::print_response(&cli_agent_error(
+            "cli:agent:start",
+            "agent_start_failed",
+            "agent start response did not include the agent kind",
+        ));
+    };
     let waited = wait_for_named_agent(
         name,
         &pane_id,
@@ -955,6 +1011,9 @@ fn print_agent_help() {
     eprintln!("  herdr agent attach <target> [--takeover]");
     eprintln!(
         "  herdr agent start <name> --kind KIND --pane ID [--timeout MS] [--no-supervisor] [-- <agent-args...>]"
+    );
+    eprintln!(
+        "  herdr agent resume <name> (--agent-session JSON | --kind KIND --session-id ID | --kind KIND --session-path PATH | --from TARGET) (--pane ID | --cwd DIR [--workspace ID]) [--timeout MS] [--no-supervisor] [-- <agent-args...>]"
     );
     eprintln!("  herdr agent deliver <target> <text> [--source NAME] [--ttl DURATION]");
     eprintln!("  herdr agent answer <target> <1-9> --dialog ID");
