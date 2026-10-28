@@ -957,6 +957,82 @@ async fn queued_deliveries_and_links_come_back_from_the_state_file() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// Starts typing a line to the worker and returns the state file the next server reads.
+fn worker_delivery_in_flight(name: &str) -> (Fixture, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-orchestration-{name}-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let path = dir.join(store::STORE_FILE);
+    let mut f = fixture();
+    f.app.orchestration = Orchestration::new(Some(path.clone()), 600);
+    f.deliver("worker", "MAIL|1");
+    f.tick();
+    assert_eq!(f.app.orchestration.in_flight.len(), 1);
+    (f, path)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_handoff_lets_a_line_being_typed_finish_so_it_is_not_typed_again() {
+    let (mut f, path) = worker_delivery_in_flight("handoff");
+    f.app.finish_typing_deliveries(Duration::from_secs(2));
+    f.app.close_orchestration();
+    assert!(f.app.orchestration.in_flight.is_empty());
+    assert!(
+        store::load(&path).deliveries.is_empty(),
+        "the panes outlive a handoff, so the next server must not type the line again"
+    );
+    assert_eq!(typed(&mut f.worker_rx).await, "MAIL|1\r");
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn a_shutdown_keeps_a_line_being_typed_for_the_next_server() {
+    let (mut f, path) = worker_delivery_in_flight("shutdown");
+    f.app.close_orchestration();
+    let stored = store::load(&path);
+    assert_eq!(
+        stored
+            .deliveries
+            .iter()
+            .map(|delivery| delivery.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["MAIL|1"],
+        "the panes end with the server, so the resumed agent gets the line again"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[tokio::test]
+async fn a_queued_delivery_keeps_its_id_across_a_restart() {
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-orchestration-id-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let path = dir.join(store::STORE_FILE);
+    let mut f = fixture();
+    f.app.orchestration = Orchestration::new(Some(path.clone()), 600);
+    let delivery = f.deliver("lead", "held while focused");
+    f.app.save_orchestration_now();
+
+    f.app.orchestration = Orchestration::new(Some(path), 600);
+    f.app.ensure_orchestration_loaded();
+    let response = f.app.handle_agent_cancel_delivery(
+        "req".into(),
+        AgentCancelDeliveryParams {
+            delivery_id: delivery.delivery_id.clone(),
+        },
+    );
+    assert!(
+        serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+        "the id a sender got before the restart still names the delivery: {response}"
+    );
+    assert_eq!(f.agent(0, f.supervisor).pending_deliveries, None);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn job(name: &str, script: &str) -> JobAddParams {
     JobAddParams {
         name: name.into(),

@@ -1145,6 +1145,7 @@ impl App {
             .chain(self.orchestration.deliveries.iter())
             .filter_map(|delivery| {
                 Some(store::StoredDelivery {
+                    id: Some(delivery.id.clone()),
                     pane_id: pane(&delivery.terminal)?,
                     text: delivery.text.clone(),
                     source: delivery.source.clone(),
@@ -1267,6 +1268,19 @@ impl App {
         self.save_orchestration_now();
     }
 
+    /// Waits up to `limit` for the deliveries being typed to finish. A live handoff keeps the
+    /// panes, so a line it saves as queued would be typed into them a second time.
+    pub(crate) fn finish_typing_deliveries(&mut self, limit: Duration) {
+        let deadline = Instant::now() + limit;
+        loop {
+            self.settle_in_flight_deliveries();
+            if self.orchestration.in_flight.is_empty() || Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// Saves changed state at once.
     pub(crate) fn save_orchestration_now(&mut self) {
         if !std::mem::take(&mut self.orchestration.dirty) {
@@ -1311,6 +1325,9 @@ impl App {
                 None,
             );
             self.orchestration.deliveries.cancel(&restored.id);
+            if let Some(id) = delivery.id {
+                restored.id = id;
+            }
             restored.expires_at_ms = delivery.expires_at_ms;
             self.orchestration.deliveries.restore(restored);
         }

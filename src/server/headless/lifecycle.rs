@@ -1,6 +1,8 @@
 use super::*;
 
 const LIVE_HANDOFF_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(6);
+/// How long a handoff waits for deliveries being typed: the submit delay plus the writes.
+const HANDOFF_TYPING_LIMIT: Duration = Duration::from_secs(1);
 
 pub(super) fn wait_for_live_handoff_response_write(
     response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
@@ -69,6 +71,7 @@ impl HeadlessServer {
             }
         }
 
+        self.app.finish_typing_deliveries(HANDOFF_TYPING_LIMIT);
         // The new server reads this file, so it must hold the last change.
         self.app.close_orchestration();
         let snapshot = crate::persist::capture(

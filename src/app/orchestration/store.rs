@@ -36,6 +36,9 @@ pub(super) struct StoredTokens {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct StoredDelivery {
+    /// The id senders got, so they can still cancel or look up the delivery after a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) id: Option<String>,
     pub(super) pane_id: String,
     pub(super) text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -212,6 +215,7 @@ mod tests {
         StoredState {
             version: 0,
             deliveries: vec![StoredDelivery {
+                id: Some("dlv_a_1".into()),
                 pane_id: "w1:p2".into(),
                 text: "MAIL|1".into(),
                 source: Some("dispatch".into()),
@@ -240,6 +244,20 @@ mod tests {
         let mut expected = state();
         expected.version = STORE_VERSION;
         assert_eq!(load(&path), expected);
+    }
+
+    #[test]
+    fn a_delivery_saved_without_an_id_still_loads() {
+        let dir = TestDir::new("no-id");
+        let path = dir.path().join(STORE_FILE);
+        save(&path, &state()).unwrap();
+        let mut file: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        file["deliveries"][0].as_object_mut().unwrap().remove("id");
+        std::fs::write(&path, file.to_string()).unwrap();
+        let loaded = load(&path);
+        assert_eq!(loaded.deliveries.len(), 1);
+        assert_eq!(loaded.deliveries[0].id, None);
     }
 
     #[test]
