@@ -310,12 +310,10 @@ pub(super) fn pane_supervise(args: &[String]) -> std::io::Result<i32> {
 
 /// Makes the calling pane the supervisor of a pane it started an agent in.
 pub(super) fn supervise_from_caller(pane_id: &str) {
-    let Some(caller) = super::target::caller_pane_id() else {
+    let in_plugin = std::env::var_os("HERDR_PLUGIN_ID").is_some();
+    let Some(caller) = supervisor_for(pane_id, super::target::caller_pane_id(), in_plugin) else {
         return;
     };
-    if caller == pane_id {
-        return;
-    }
     // The link is a courtesy: an older server without the method must not fail the start.
     let _ = super::send_request_unchecked(&Request {
         id: "cli:agent:start:supervise".into(),
@@ -325,6 +323,12 @@ pub(super) fn supervise_from_caller(pane_id: &str) {
             report: Vec::new(),
         }),
     });
+}
+
+/// The pane that supervises a new agent: the caller's own pane, never the agent's.
+/// A plugin command's HERDR_PANE_ID is the focused pane, not a caller, so it gets none.
+fn supervisor_for(pane_id: &str, caller: Option<String>, in_plugin: bool) -> Option<String> {
+    caller.filter(|caller| !in_plugin && caller != pane_id)
 }
 
 pub(super) fn run_job_command(args: &[String]) -> std::io::Result<i32> {
@@ -413,6 +417,21 @@ mod tests {
             cwd: Some("/work".into()),
             now_ms: 1_000,
         }
+    }
+
+    #[test]
+    fn an_agent_started_from_a_pane_reports_to_that_pane() {
+        assert_eq!(
+            supervisor_for("w2:p1", Some("w1:p2".into()), false),
+            Some("w1:p2".into())
+        );
+        assert_eq!(supervisor_for("w2:p1", None, false), None);
+        assert_eq!(supervisor_for("w1:p2", Some("w1:p2".into()), false), None);
+    }
+
+    #[test]
+    fn an_agent_started_by_a_plugin_gets_no_supervisor() {
+        assert_eq!(supervisor_for("w2:p1", Some("w1:p2".into()), true), None);
     }
 
     #[test]
