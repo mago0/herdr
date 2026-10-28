@@ -26,8 +26,17 @@ pub(crate) use super::unix_common::{
 mod bootstrap;
 pub(crate) use bootstrap::{configure_server_daemon_context, prepare_server_process};
 
+mod shutdown;
+pub(crate) use shutdown::monitor_host_shutdown;
+
 #[cfg(test)]
 mod config_file_tests;
+
+#[cfg(test)]
+mod input_tests;
+
+mod input;
+pub(crate) use input::PtyInputGuard;
 
 pub(crate) fn config_file_link_count(path: &Path) -> std::io::Result<u64> {
     use std::os::unix::fs::MetadataExt;

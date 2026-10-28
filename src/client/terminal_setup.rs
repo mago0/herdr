@@ -52,6 +52,7 @@ pub(super) fn setup_terminal_with_capabilities(
         buffered_host_input: Vec::new(),
         reset_keyboard_enhancements: false,
         reset_modify_other_keys: false,
+        modify_other_keys_sequence: None,
         reset_host_color_scheme_reports: false,
         restore_claimed: Arc::new(AtomicBool::new(false)),
         restored: false,
@@ -76,7 +77,7 @@ pub(super) fn setup_terminal_with_capabilities(
     let (host_probe, buffered_host_input) = if enable_client_protocols {
         terminal_guard.reset_keyboard_enhancements = true;
         push_keyboard_enhancement_flags()?;
-        let (probe, buffered_input) = query_host_escape_disambiguation();
+        let (probe, buffered_input) = query_host_capabilities(true);
         set_mouse_capture(mouse_capture, false)?;
         execute!(io::stdout(), EnableBracketedPaste, EnableFocusChange)?;
         if host_color_scheme_reports {
@@ -88,9 +89,10 @@ pub(super) fn setup_terminal_with_capabilities(
         if should_enable_host_color_scheme_reports(true) {
             write_host_color_scheme_report_mode(&mut io::stdout(), false)?;
         }
+        let (probe, buffered_input) = query_host_capabilities(false);
         set_mouse_capture(mouse_capture, false)?;
         execute!(io::stdout(), EnableBracketedPaste)?;
-        (HostTerminalProbe::default(), Vec::new())
+        (probe, buffered_input)
     };
 
     #[cfg(windows)]
@@ -114,6 +116,7 @@ pub(super) fn setup_terminal_with_capabilities(
         .flatten();
     if let Some(mode) = modify_other_keys_mode {
         terminal_guard.reset_modify_other_keys = true;
+        terminal_guard.modify_other_keys_sequence = Some(mode.set_sequence());
         io::stdout().write_all(mode.set_sequence())?;
         io::stdout().flush()?;
     }
@@ -137,6 +140,8 @@ pub(super) struct TerminalGuard {
     buffered_host_input: Vec<u8>,
     reset_keyboard_enhancements: bool,
     reset_modify_other_keys: bool,
+    /// The modifyOtherKeys sequence written at setup, re-sent on refresh.
+    modify_other_keys_sequence: Option<&'static [u8]>,
     reset_host_color_scheme_reports: bool,
     restore_claimed: Arc<AtomicBool>,
     restored: bool,
@@ -145,7 +150,7 @@ pub(super) struct TerminalGuard {
 }
 
 #[cfg(not(windows))]
-const HOST_KEYBOARD_QUERY_TIMEOUT: Duration = Duration::from_millis(250);
+const HOST_CAPABILITY_QUERY_TIMEOUT: Duration = Duration::from_millis(250);
 #[cfg(not(windows))]
 const MAX_BUFFERED_HOST_INPUT: usize = 64 * 1024;
 
@@ -153,9 +158,7 @@ const MAX_BUFFERED_HOST_INPUT: usize = 64 * 1024;
 #[derive(Default)]
 struct HostKeyboardProbeResponses {
     flags: Option<u16>,
-    /// DECRPM for SGR pixel mouse (1016): Some(true) when the host knows the
-    /// mode, Some(false) when it reports it unsupported.
-    sgr_pixel_mouse: Option<bool>,
+    sgr_pixel_mouse_status: Option<u8>,
     primary_device_attributes: bool,
 }
 
@@ -163,27 +166,33 @@ struct HostKeyboardProbeResponses {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct HostTerminalProbe {
     pub(super) escape_disambiguation: bool,
-    /// None when the host did not answer: keep assuming support.
+    /// None when the host did not answer; exact pixel input stays disabled.
     pub(super) sgr_pixel_mouse: Option<bool>,
 }
 
 #[cfg(not(windows))]
-fn query_host_escape_disambiguation() -> (HostTerminalProbe, Vec<u8>) {
-    const QUERY: &[u8] = b"\x1b[?u\x1b[?1016$p\x1b[c";
+fn query_host_capabilities(query_keyboard: bool) -> (HostTerminalProbe, Vec<u8>) {
+    const FULL_QUERY: &[u8] = b"\x1b[?1016$p\x1b[?u\x1b[c";
+    const PIXEL_MOUSE_QUERY: &[u8] = b"\x1b[?1016$p\x1b[c";
 
     let mut buffered_input = Vec::new();
+    let query = if query_keyboard {
+        FULL_QUERY
+    } else {
+        PIXEL_MOUSE_QUERY
+    };
     if let Err(err) = io::stdout()
-        .write_all(QUERY)
+        .write_all(query)
         .and_then(|()| io::stdout().flush())
     {
-        tracing::debug!(%err, "host keyboard enhancement query unavailable");
+        tracing::debug!(%err, "host capability query unavailable");
         return (HostTerminalProbe::default(), buffered_input);
     }
 
     // Bypass StdinLock's shared buffer so poll and read observe the same bytes.
     let stdin = io::stdin();
     let stdin_fd = stdin.as_raw_fd();
-    let deadline = Instant::now() + HOST_KEYBOARD_QUERY_TIMEOUT;
+    let deadline = Instant::now() + HOST_CAPABILITY_QUERY_TIMEOUT;
     let mut responses = HostKeyboardProbeResponses::default();
     while !responses.primary_device_attributes && buffered_input.len() < MAX_BUFFERED_HOST_INPUT {
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
@@ -222,10 +231,21 @@ fn query_host_escape_disambiguation() -> (HostTerminalProbe, Vec<u8>) {
 
 #[cfg(not(windows))]
 fn host_terminal_probe(responses: &HostKeyboardProbeResponses) -> HostTerminalProbe {
+    let sgr_pixel_mouse = match responses.sgr_pixel_mouse_status {
+        // The query follows an explicit reset, so a host still reporting SET may
+        // send pixels where Herdr expects cells. Wrong mouse units beat refusing
+        // to start, so keep pixel mouse off and continue.
+        Some(status @ (1 | 3)) => {
+            tracing::warn!(status, "host SGR pixel mouse mode stays set after reset");
+            Some(false)
+        }
+        Some(2) => Some(true),
+        Some(0 | 4) => Some(false),
+        _ => None,
+    };
     HostTerminalProbe {
         escape_disambiguation: host_escape_disambiguation_confirmed(responses),
-        // An explicit mode answer stands even if the probe timed out later.
-        sgr_pixel_mouse: responses.sgr_pixel_mouse,
+        sgr_pixel_mouse,
     }
 }
 
@@ -281,19 +301,14 @@ fn consume_host_keyboard_probe_responses(
             break;
         }
         let body = &buffered_input[start + 3..end];
-        // DECRPM: CSI ? 1016 ; Ps $ y (0 = not recognized, 4 = permanently reset).
+        // DECRPM: CSI ? 1016 ; Ps $ y.
         if buffered_input[end] == b'$' {
             let Some(&final_byte) = buffered_input.get(end + 1) else {
                 break;
             };
-            let reply = std::str::from_utf8(body)
-                .ok()
-                .and_then(|body| body.split_once(';'))
-                .filter(|(mode, _)| *mode == "1016")
-                .and_then(|(_, state)| state.parse::<u8>().ok());
             if final_byte == b'y' {
-                if let Some(state) = reply {
-                    responses.sgr_pixel_mouse = Some(matches!(state, 1..=3));
+                if let Some(status) = parse_sgr_pixel_mouse_status(body) {
+                    responses.sgr_pixel_mouse_status = Some(status);
                     buffered_input.drain(start..=end + 1);
                     continue;
                 }
@@ -332,6 +347,14 @@ fn consume_host_keyboard_probe_responses(
 }
 
 #[cfg(not(windows))]
+fn parse_sgr_pixel_mouse_status(body: &[u8]) -> Option<u8> {
+    let mut fields = body.split(|byte| *byte == b';');
+    (fields.next()? == b"1016").then_some(())?;
+    let status = std::str::from_utf8(fields.next()?).ok()?.parse().ok()?;
+    (fields.next().is_none() && status <= 4).then_some(status)
+}
+
+#[cfg(not(windows))]
 fn host_control_string_end(bytes: &[u8]) -> Option<Option<usize>> {
     if bytes.first() != Some(&0x1b) {
         return None;
@@ -360,7 +383,7 @@ fn host_control_string_end(bytes: &[u8]) -> Option<Option<usize>> {
 }
 
 #[cfg(windows)]
-fn query_host_escape_disambiguation() -> (HostTerminalProbe, Vec<u8>) {
+fn query_host_capabilities(_query_keyboard: bool) -> (HostTerminalProbe, Vec<u8>) {
     (HostTerminalProbe::default(), Vec::new())
 }
 
@@ -559,16 +582,12 @@ pub(super) fn effective_mouse_capture(
     server_enabled || direct_attach_preference
 }
 
-/// Host SGR pixel reports are used only when exact cell geometry maps them to
-/// cells and the host did not report the mode unsupported (`host_support`
-/// None means it never answered the probe).
 pub(super) fn effective_sgr_pixel_mouse(
     enabled: bool,
     requested: bool,
-    exact_geometry: bool,
-    host_support: Option<bool>,
+    pixel_mouse_available: bool,
 ) -> bool {
-    enabled && requested && exact_geometry && host_support != Some(false)
+    enabled && requested && pixel_mouse_available
 }
 
 #[cfg(any(windows, test))]
@@ -749,6 +768,39 @@ fn disable_windows_win32_input_mode(writer: &mut impl std::io::Write) -> io::Res
     writer.flush()
 }
 
+/// Host input modes to re-assert after the host may have reset them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct HostKeyboardProtocolRefresh {
+    /// Some when the host confirmed the kitty keyboard protocol at startup;
+    /// the value says whether all keys are currently reported as escapes.
+    pub(super) kitty_report_all_keys: Option<bool>,
+    pub(super) modify_other_keys_sequence: Option<&'static [u8]>,
+    /// Re-enable focus reporting (1004). Callers reacting to a focus-in skip
+    /// it: that host still reports focus, and re-enabling from a focus report
+    /// could loop on a host that answers the enable with another report.
+    pub(super) focus_reporting: bool,
+}
+
+pub(super) fn write_host_keyboard_protocol_refresh(
+    writer: &mut impl io::Write,
+    refresh: HostKeyboardProtocolRefresh,
+) -> io::Result<()> {
+    if let Some(report_all_keys) = refresh.kitty_report_all_keys {
+        // Replace Herdr's stack entry rather than pushing, so repeated
+        // refreshes never grow the host's keyboard stack. On a host that
+        // reset its stack, the pop is a no-op and the push restores the flags.
+        crate::terminal_modes::set_host_kitty_keyboard_report_all(writer, report_all_keys)?;
+    }
+    if let Some(sequence) = refresh.modify_other_keys_sequence {
+        writer.write_all(sequence)?;
+    }
+    writer.write_all(b"\x1b[?2004h")?;
+    if refresh.focus_reporting {
+        writer.write_all(b"\x1b[?1004h")?;
+    }
+    writer.flush()
+}
+
 impl TerminalGuard {
     pub(super) fn host_escape_disambiguation_active(&self) -> bool {
         self.host_escape_disambiguation_active
@@ -761,6 +813,31 @@ impl TerminalGuard {
 
     pub(super) fn take_buffered_host_input(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.buffered_host_input)
+    }
+
+    /// Re-sends the keyboard and input modes enabled at setup. A host that
+    /// reset its terminal state (a reconnect or window reload) forgets them,
+    /// which turns Shift+Enter and Ctrl+Enter into plain Enter.
+    pub(super) fn refresh_host_keyboard_protocol(
+        &self,
+        writer: &mut impl io::Write,
+        report_all_keys: bool,
+        focus_reporting: bool,
+    ) -> io::Result<()> {
+        // Direct attach leaves these modes to the attached pane.
+        if !self.reset_keyboard_enhancements || self.restore_claimed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        write_host_keyboard_protocol_refresh(
+            writer,
+            HostKeyboardProtocolRefresh {
+                kitty_report_all_keys: self
+                    .host_escape_disambiguation_active
+                    .then_some(report_all_keys),
+                modify_other_keys_sequence: self.modify_other_keys_sequence,
+                focus_reporting,
+            },
+        )
     }
 
     #[cfg(windows)]
@@ -888,9 +965,150 @@ mod tests {
     }
 
     #[cfg(not(windows))]
+    fn refresh_test_guard(
+        kitty_confirmed: bool,
+        client_protocols: bool,
+        modify_other_keys_sequence: Option<&'static [u8]>,
+    ) -> TerminalGuard {
+        TerminalGuard {
+            host_escape_disambiguation_active: kitty_confirmed,
+            host_sgr_pixel_mouse: None,
+            buffered_host_input: Vec::new(),
+            reset_keyboard_enhancements: client_protocols,
+            reset_modify_other_keys: modify_other_keys_sequence.is_some(),
+            modify_other_keys_sequence,
+            reset_host_color_scheme_reports: false,
+            restore_claimed: Arc::new(AtomicBool::new(false)),
+            // Keep Drop from writing restore sequences to the test's stdout.
+            restored: true,
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn refresh_bytes(guard: &TerminalGuard, report_all_keys: bool, focus: bool) -> Vec<u8> {
+        let mut output = Vec::new();
+        guard
+            .refresh_host_keyboard_protocol(&mut output, report_all_keys, focus)
+            .unwrap();
+        output
+    }
+
+    #[cfg(not(windows))]
     #[test]
-    fn host_keyboard_probe_consumes_fragmented_responses_and_preserves_input() {
-        let stream = b"before\x1b[?7u-middle-\x1b[?1;2cafter";
+    fn host_keyboard_protocol_refresh_resends_the_setup_modes() {
+        // Focus-in on a kitty host: replace Herdr's stack entry, keep paste on.
+        let kitty = refresh_test_guard(true, true, None);
+        assert_eq!(
+            refresh_bytes(&kitty, false, false),
+            b"\x1b[<1u\x1b[>7u\x1b[?2004h"
+        );
+        // Resize while a pane wants all keys, on a modifyOtherKeys host too.
+        let both = refresh_test_guard(true, true, Some(b"\x1b[>4;1m"));
+        assert_eq!(
+            refresh_bytes(&both, true, true),
+            b"\x1b[<1u\x1b[>31u\x1b[>4;1m\x1b[?2004h\x1b[?1004h"
+        );
+        // A host that never confirmed the kitty protocol gets no kitty flags.
+        let legacy = refresh_test_guard(false, true, None);
+        assert_eq!(
+            refresh_bytes(&legacy, false, true),
+            b"\x1b[?2004h\x1b[?1004h"
+        );
+        // Direct attach leaves keyboard modes to the attached pane.
+        let direct = refresh_test_guard(true, false, None);
+        assert!(refresh_bytes(&direct, false, true).is_empty());
+        // Nothing is re-enabled once the terminal is being restored.
+        kitty.restore_claimed.store(true, Ordering::Release);
+        assert!(refresh_bytes(&kitty, false, true).is_empty());
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_keyboard_protocol_refresh_restores_shift_enter_after_host_reset() {
+        use crate::input::{KeyboardProtocol, TerminalKey};
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let guard = refresh_test_guard(true, true, None);
+        let shift_enter = TerminalKey::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        // libghostty stands in for the host terminal. `reset` models a host
+        // that lost its modes, like a reloaded VS Code window (#4985).
+        for reset in [false, true] {
+            let (host, _rx) =
+                crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                    80, 24, 0, b"", 4096,
+                );
+            // Herdr's setup push.
+            host.test_process_pty_bytes(b"\x1b[>7u");
+            if reset {
+                host.test_process_pty_bytes(b"\x1bc");
+                assert_eq!(host.keyboard_protocol(), KeyboardProtocol::Legacy);
+                assert_eq!(host.encode_terminal_key(shift_enter.clone()), b"\r");
+            }
+            for _ in 0..3 {
+                host.test_process_pty_bytes(&refresh_bytes(&guard, false, true));
+            }
+            assert_eq!(
+                host.keyboard_protocol(),
+                KeyboardProtocol::Kitty { flags: 7 },
+                "reset={reset}"
+            );
+            assert_eq!(
+                host.encode_terminal_key(shift_enter.clone()),
+                b"\x1b[13;2u",
+                "reset={reset}"
+            );
+            // Refreshes never grow the stack: Herdr's one exit pop restores
+            // the host's own keyboard mode.
+            host.test_process_pty_bytes(b"\x1b[<1u");
+            assert_eq!(
+                host.keyboard_protocol(),
+                KeyboardProtocol::Legacy,
+                "reset={reset}"
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn host_keyboard_protocol_refresh_keeps_the_outer_mode_across_report_all_toggles() {
+        use crate::input::KeyboardProtocol;
+
+        let guard = refresh_test_guard(true, true, None);
+        let (host, _rx) = crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+            80, 24, 0, b"", 4096,
+        );
+        // Something outside Herdr (a shell or wrapper) already set its own mode.
+        host.test_process_pty_bytes(b"\x1b[>1u");
+        // Herdr's setup push.
+        host.test_process_pty_bytes(b"\x1b[>7u");
+        for round in 0..6 {
+            let report_all = round % 2 == 0;
+            let mut toggle = Vec::new();
+            crate::terminal_modes::set_host_kitty_keyboard_report_all(&mut toggle, report_all)
+                .unwrap();
+            host.test_process_pty_bytes(&toggle);
+            for focus in [false, true, false] {
+                host.test_process_pty_bytes(&refresh_bytes(&guard, report_all, focus));
+            }
+            let flags = if report_all { 31 } else { 7 };
+            assert_eq!(
+                host.keyboard_protocol(),
+                KeyboardProtocol::Kitty { flags },
+                "round {round}"
+            );
+        }
+        // Herdr's one exit pop restores exactly the outer mode.
+        host.test_process_pty_bytes(b"\x1b[<1u");
+        assert_eq!(
+            host.keyboard_protocol(),
+            KeyboardProtocol::Kitty { flags: 1 }
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn host_capability_probe_consumes_fragmented_responses_and_preserves_input() {
+        let stream = b"before\x1b[?1016;2$y-middle-\x1b[?7u-\x1b[?1;2cafter";
 
         for split in 1..stream.len() {
             let mut buffered = Vec::new();
@@ -900,37 +1118,28 @@ mod tests {
             buffered.extend_from_slice(&stream[split..]);
             consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
 
+            assert_eq!(responses.sgr_pixel_mouse_status, Some(2), "split {split}");
             assert_eq!(responses.flags, Some(7), "split {split}");
             assert!(responses.primary_device_attributes, "split {split}");
-            assert_eq!(buffered, b"before-middle-after", "split {split}");
+            assert_eq!(buffered, b"before-middle--after", "split {split}");
         }
     }
 
     #[cfg(not(windows))]
     #[test]
-    fn host_probe_reads_sgr_pixel_mouse_support_at_any_split() {
-        // kitty/Ghostty answer 2 (reset, supported); Alacritty answers 0 (unknown).
-        for (reply, expected) in [
-            (&b"\x1b[?1016;2$y"[..], Some(true)),
-            (b"\x1b[?1016;1$y", Some(true)),
-            (b"\x1b[?1016;0$y", Some(false)),
-            (b"\x1b[?1016;4$y", Some(false)),
-            (b"", None),
-        ] {
-            let stream = [&b"x\x1b[?7u"[..], reply, b"\x1b[?1;2cy"].concat();
-            for split in 1..stream.len() {
-                let mut buffered = stream[..split].to_vec();
-                let mut responses = HostKeyboardProbeResponses::default();
-                consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
-                buffered.extend_from_slice(&stream[split..]);
-                consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
+    fn host_capability_probe_accepts_only_usable_sgr_pixel_mouse_states() {
+        for status in 0..=4 {
+            let mut buffered = format!("\x1b[?1016;{status}$y").into_bytes();
+            let mut responses = HostKeyboardProbeResponses::default();
 
-                assert_eq!(
-                    responses.sgr_pixel_mouse, expected,
-                    "{reply:?} split {split}"
-                );
-                assert_eq!(buffered, b"xy", "{reply:?} split {split}");
-            }
+            consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
+
+            assert_eq!(
+                host_terminal_probe(&responses).sgr_pixel_mouse,
+                Some(status == 2),
+                "status {status}"
+            );
+            assert!(buffered.is_empty());
         }
     }
 
@@ -948,12 +1157,13 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn host_keyboard_probe_preserves_typed_input_before_responses() {
-        let mut buffered = b"aPtyped\x1b[?7u\x1b[?1;2c".to_vec();
+        let mut buffered = b"aPtyped\x1b[?1016;2$y\x1b[?7u\x1b[?1;2c".to_vec();
         let mut responses = HostKeyboardProbeResponses::default();
 
         consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
 
         assert!(host_escape_disambiguation_confirmed(&responses));
+        assert_eq!(host_terminal_probe(&responses).sgr_pixel_mouse, Some(true));
         assert_eq!(buffered, b"aPtyped");
     }
 
@@ -987,27 +1197,33 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn host_keyboard_probe_preserves_response_shaped_payloads() {
-        let opaque = b"\x1b[200~paste \x1b[?1u \x1b[?1;2c\x1b[201~-\x1bPdata \x1b[?7u\x1b\\";
-        let mut buffered = [opaque.as_slice(), b"\x1b[?7u\x1b[?1;2c"].concat();
+        let opaque =
+            b"\x1b[200~paste \x1b[?1016;2$y \x1b[?1u \x1b[?1;2c\x1b[201~-\x1bPdata \x1b[?7u\x1b\\";
+        let mut buffered = [opaque.as_slice(), b"\x1b[?1016;2$y\x1b[?7u\x1b[?1;2c"].concat();
         let mut responses = HostKeyboardProbeResponses::default();
 
         consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
 
         assert!(host_escape_disambiguation_confirmed(&responses));
+        assert_eq!(host_terminal_probe(&responses).sgr_pixel_mouse, Some(true));
         assert_eq!(buffered, opaque);
     }
 
     #[cfg(not(windows))]
     #[test]
     fn host_keyboard_probe_preserves_malformed_responses() {
-        let mut buffered = b"a\x1b[?7;1ub\x1b[?65536uc".to_vec();
+        let mut buffered = b"a\x1b[?7;1ub\x1b[?65536uc\x1b[?1016;5$y\x1b[?1006;2$y".to_vec();
         let mut responses = HostKeyboardProbeResponses::default();
 
         consume_host_keyboard_probe_responses(&mut buffered, &mut responses);
 
         assert_eq!(responses.flags, None);
+        assert_eq!(responses.sgr_pixel_mouse_status, None);
         assert!(!responses.primary_device_attributes);
-        assert_eq!(buffered, b"a\x1b[?7;1ub\x1b[?65536uc");
+        assert_eq!(
+            buffered,
+            b"a\x1b[?7;1ub\x1b[?65536uc\x1b[?1016;5$y\x1b[?1006;2$y"
+        );
     }
 
     #[test]
