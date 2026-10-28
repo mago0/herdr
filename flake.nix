@@ -72,9 +72,31 @@
         };
       });
 
+      homeManagerModules.default = import ./nix/module.nix self;
+
       checks = forAllSystems (system: {
         herdr = self.packages.${system}.default;
         default = self.checks.${system}.herdr;
+        # The module sets Home Manager's programs.herdr.package; this stands in for those options.
+        module =
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+            evaluated = lib.evalModules {
+              modules = [
+                self.homeManagerModules.default
+                {
+                  options.programs.herdr = {
+                    enable = lib.mkEnableOption "herdr";
+                    package = lib.mkOption { type = lib.types.package; };
+                  };
+                  config.programs.herdr.enable = true;
+                }
+              ];
+              specialArgs = { inherit pkgs; };
+            };
+          in
+          assert evaluated.config.programs.herdr.package == self.packages.${system}.default;
+          pkgs.runCommand "herdr-module-check" { } "touch $out";
       });
 
       devShells = forAllSystems (

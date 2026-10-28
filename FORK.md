@@ -67,6 +67,16 @@ The fork starts a sidebar plugin pane again when its program file changes, so a 
 
 A running server keeps the binary it started with. `herdr server live-handoff --import-exe ~/.local/lib/herdr-fork/herdr` moves it to the new one and keeps its panes.
 
+### With Nix, devbox or Home Manager
+
+```sh
+nix profile add github:mago0/herdr/fork          # or: devbox global add github:mago0/herdr/fork
+```
+
+With Home Manager, add the flake as an input, import `herdr.homeManagerModules.default` and set `programs.herdr.enable = true`. The module points Home Manager's own `programs.herdr` at this fork, so its `settings` work as usual.
+
+After an upgrade, run `herdr server live-handoff`. A herdr started through a profile link, such as `~/.nix-profile/bin/herdr`, starts its servers, handoffs, plugins and panes through that link, so the handoff and every pane get the version the profile holds now, and a garbage collection of the old version does not break them.
+
 ## Version
 
 A fork build reports the upstream version it is made from with `+fork` after it, for example `herdr 0.9.3+fork`. Update checks, plugin version limits and the release a remote machine gets still use the upstream number.
