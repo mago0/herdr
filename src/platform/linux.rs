@@ -90,7 +90,7 @@ struct ProcGroupMember {
     state: char,
 }
 
-pub(crate) fn launch_executable() -> std::io::Result<PathBuf> {
+pub(crate) fn running_executable() -> std::io::Result<PathBuf> {
     use std::os::unix::ffi::OsStrExt;
 
     let executable = std::env::current_exe()?;

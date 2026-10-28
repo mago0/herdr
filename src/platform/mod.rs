@@ -179,9 +179,23 @@ pub(crate) fn classify_child_exit(_status: &portable_pty::ExitStatus) -> ChildEx
 }
 
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn launch_executable() -> std::io::Result<std::path::PathBuf> {
+pub(crate) fn running_executable() -> std::io::Result<std::path::PathBuf> {
     std::env::current_exe()
 }
+
+/// The path to start herdr by. For a Nix build this is the profile link it was started
+/// through, so that the next process starts whatever version the profile holds then.
+pub(crate) fn launch_executable() -> std::io::Result<std::path::PathBuf> {
+    let executable = running_executable()?;
+    let invoked = std::env::args_os().next().map(std::path::PathBuf::from);
+    let search_path = std::env::var_os("PATH");
+    Ok(
+        nix_profile::launch_link(&executable, invoked.as_deref(), search_path.as_deref())
+            .unwrap_or(executable),
+    )
+}
+
+mod nix_profile;
 
 pub(crate) fn detached_custom_command_process(command: &str) -> std::process::Command {
     let mut process = detached_custom_command_process_platform(command);
