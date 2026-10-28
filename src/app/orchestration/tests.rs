@@ -663,6 +663,202 @@ async fn a_link_is_dropped_when_the_supervisor_pane_closes() {
     assert!(f.app.orchestration.links.is_empty());
 }
 
+/// The fixture with a third agent, `mid`, in a third workspace. `mid` supervises `worker` with
+/// `report`, and `lead` supervises `mid` when `lead_over_mid` is true. The worker's workspace is
+/// in view, so lines to `lead` are typed at once.
+fn chain(
+    report: Vec<SuperviseReport>,
+    lead_over_mid: bool,
+) -> (Fixture, PaneId, tokio::sync::mpsc::Receiver<Bytes>) {
+    chain_with_store(report, lead_over_mid, None)
+}
+
+fn chain_with_store(
+    report: Vec<SuperviseReport>,
+    lead_over_mid: bool,
+    store_path: Option<std::path::PathBuf>,
+) -> (Fixture, PaneId, tokio::sync::mpsc::Receiver<Bytes>) {
+    let mut f = fixture();
+    if store_path.is_some() {
+        f.app.orchestration = Orchestration::new(store_path, 600);
+    }
+    f.app.state.workspaces.push(Workspace::test_new("mid"));
+    f.app.state.ensure_test_terminals();
+    let mid = f.app.state.workspaces[2].tabs[0].root_pane;
+    let (runtime, mid_rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+    f.app.state.insert_test_runtime(mid, runtime);
+    f.set_agent(2, mid, "mid", AgentState::Idle);
+    f.app.state.active = Some(1);
+    let mut supervise = |pane: &str, by: &str, report: Vec<SuperviseReport>| {
+        let response = f.app.handle_pane_supervise(
+            "req".into(),
+            PaneSuperviseParams {
+                pane_id: pane.into(),
+                supervisor: Some(by.into()),
+                report,
+            },
+        );
+        assert!(
+            serde_json::from_str::<SuccessResponse>(&response).is_ok(),
+            "{response}"
+        );
+    };
+    if lead_over_mid {
+        supervise("mid", "lead", Vec::new());
+    }
+    supervise("worker", "mid", report);
+    f.tick();
+    (f, mid, mid_rx)
+}
+
+#[tokio::test]
+async fn a_pane_whose_supervisor_closes_moves_to_the_supervisor_above_it() {
+    let (mut f, mid, _mid_rx) = chain(vec![SuperviseReport::Blocked], true);
+    let worker_pane = f.app.public_pane_id(1, f.worker).unwrap();
+    let mid_pane = f.app.public_pane_id(2, mid).unwrap();
+    let lead_pane = f.app.public_pane_id(0, f.supervisor).unwrap();
+
+    f.app.state.workspaces.remove(2);
+    f.tick();
+    assert_eq!(
+        typed(&mut f.supervisor_rx).await,
+        format!("HERDR|orphaned|worker|{worker_pane}|{mid_pane}\r")
+    );
+    assert_eq!(
+        f.supervise_report_events(),
+        vec![(
+            SuperviseReport::Orphaned,
+            worker_pane.clone(),
+            lead_pane.clone(),
+            "worker".to_owned(),
+            Some(mid_pane),
+        )]
+    );
+    assert_eq!(
+        f.agent(1, f.worker).supervisor_pane_id,
+        Some(lead_pane.clone())
+    );
+    let link = &f.app.orchestration.links[&f.terminal(1, f.worker)];
+    assert_eq!(link.report, vec![SuperviseReport::Blocked]);
+
+    // The move is reported one time, and the moved link reports to its new supervisor.
+    f.tick();
+    assert_eq!(typed(&mut f.supervisor_rx).await, "");
+    f.worker_state(AgentState::Blocked);
+    f.tick();
+    assert!(typed(&mut f.supervisor_rx)
+        .await
+        .starts_with(&format!("HERDR|blocked|worker|{worker_pane}")));
+    assert_eq!(f.supervise_report_events().len(), 2);
+}
+
+#[tokio::test]
+async fn a_pane_that_waits_when_it_moves_is_reported_blocked_to_its_new_supervisor() {
+    let (mut f, mid, mut mid_rx) = chain(vec![SuperviseReport::Blocked], true);
+    let worker_pane = f.app.public_pane_id(1, f.worker).unwrap();
+    let mid_pane = f.app.public_pane_id(2, mid).unwrap();
+    f.worker_state(AgentState::Blocked);
+    f.tick();
+    assert!(typed(&mut mid_rx).await.starts_with("HERDR|blocked|worker"));
+
+    f.app.state.workspaces.remove(2);
+    f.tick();
+    assert_eq!(
+        typed(&mut f.supervisor_rx).await,
+        format!("HERDR|orphaned|worker|{worker_pane}|{mid_pane}\r")
+    );
+    f.tick();
+    assert!(typed(&mut f.supervisor_rx)
+        .await
+        .starts_with(&format!("HERDR|blocked|worker|{worker_pane}")));
+    let kinds: Vec<SuperviseReport> = f
+        .supervise_report_events()
+        .into_iter()
+        .map(|(kind, ..)| kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            SuperviseReport::Blocked,
+            SuperviseReport::Orphaned,
+            SuperviseReport::Blocked
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_pane_with_no_live_supervisor_above_loses_its_link() {
+    let (mut f, _mid, _mid_rx) = chain(vec![SuperviseReport::Blocked], false);
+    f.app.state.workspaces.remove(2);
+    f.tick();
+    assert!(f.app.orchestration.links.is_empty());
+    assert_eq!(f.agent(1, f.worker).supervisor_pane_id, None);
+    assert_eq!(typed(&mut f.supervisor_rx).await, "");
+    assert!(f.supervise_report_events().is_empty());
+}
+
+#[tokio::test]
+async fn a_link_cannot_ask_for_the_orphaned_report() {
+    let mut f = fixture();
+    let response = f.app.handle_pane_supervise(
+        "req".into(),
+        PaneSuperviseParams {
+            pane_id: "worker".into(),
+            supervisor: Some("lead".into()),
+            report: vec![SuperviseReport::Orphaned],
+        },
+    );
+    assert_eq!(error_code(&response), "invalid_report");
+    assert!(f.app.orchestration.links.is_empty());
+}
+
+#[tokio::test]
+async fn a_moved_link_comes_back_from_the_state_file() {
+    let dir = std::env::temp_dir().join(format!(
+        "herdr-orchestration-orphan-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    let path = dir.join(store::STORE_FILE);
+    let (mut f, mid, _mid_rx) =
+        chain_with_store(vec![SuperviseReport::Exited], true, Some(path.clone()));
+    let worker_pane = f.app.public_pane_id(1, f.worker).unwrap();
+    let mid_pane = f.app.public_pane_id(2, mid).unwrap();
+    let lead_pane = f.app.public_pane_id(0, f.supervisor).unwrap();
+
+    // The supervisor closes and the server stops before a tick sees it.
+    f.app.state.workspaces.remove(2);
+    f.app.close_orchestration();
+    assert_eq!(
+        typed(&mut f.supervisor_rx).await,
+        "",
+        "a line queued while the server stops is typed by the next server"
+    );
+    let stored = store::load(&path);
+    assert_eq!(stored.links.len(), 1);
+    assert_eq!(stored.links[0].pane_id, worker_pane);
+    assert_eq!(stored.links[0].supervisor_pane_id, lead_pane);
+    assert_eq!(stored.links[0].report, vec![SuperviseReport::Exited]);
+    assert_eq!(
+        stored
+            .deliveries
+            .iter()
+            .map(|delivery| delivery.text.as_str())
+            .collect::<Vec<_>>(),
+        vec![format!("HERDR|orphaned|worker|{worker_pane}|{mid_pane}").as_str()]
+    );
+
+    f.app.orchestration = Orchestration::new(Some(path.clone()), 600);
+    f.app.ensure_orchestration_loaded();
+    assert_eq!(f.agent(1, f.worker).supervisor_pane_id, Some(lead_pane));
+    f.tick();
+    assert_eq!(
+        typed(&mut f.supervisor_rx).await,
+        format!("HERDR|orphaned|worker|{worker_pane}|{mid_pane}\r")
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[tokio::test]
 async fn a_working_agent_with_a_still_screen_is_marked_stalled_and_reported() {
     let mut f = fixture();

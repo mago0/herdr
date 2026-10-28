@@ -1168,7 +1168,8 @@
           "enum": [
             "blocked",
             "exited",
-            "stalled"
+            "stalled",
+            "orphaned"
           ],
           "type": "string"
         },
@@ -4771,7 +4772,8 @@
           "enum": [
             "blocked",
             "exited",
-            "stalled"
+            "stalled",
+            "orphaned"
           ],
           "type": "string"
         },
@@ -11803,7 +11805,8 @@
           "enum": [
             "blocked",
             "exited",
-            "stalled"
+            "stalled",
+            "orphaned"
           ],
           "type": "string"
         },

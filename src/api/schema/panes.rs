@@ -451,6 +451,8 @@ pub enum SuperviseReport {
     Blocked,
     Exited,
     Stalled,
+    // Sent by the server when a pane moves to a new supervisor. A link cannot ask for it.
+    Orphaned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

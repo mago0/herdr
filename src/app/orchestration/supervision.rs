@@ -36,6 +36,23 @@ pub(crate) fn would_cycle(
     true
 }
 
+/// The first pane that `live` accepts on the chain that starts at `supervisor` and goes up
+/// through the supervisor of each pane. A pane whose supervisor is gone moves to it.
+pub(crate) fn nearest_live_supervisor(
+    links: &HashMap<TerminalId, Supervision>,
+    supervisor: &TerminalId,
+    live: impl Fn(&TerminalId) -> bool,
+) -> Option<TerminalId> {
+    let mut current = supervisor;
+    for _ in 0..=links.len() {
+        if live(current) {
+            return Some(current.clone());
+        }
+        current = &links.get(current)?.supervisor;
+    }
+    None
+}
+
 const MAX_DETAIL_CHARS: usize = 300;
 
 /// The line typed into the supervisor pane. Fields are separated by `|`.
@@ -206,6 +223,31 @@ mod tests {
         assert!(would_cycle(&links, &a, &c));
         assert!(would_cycle(&links, &b, &c));
         assert!(!would_cycle(&links, &c, &a));
+    }
+
+    #[test]
+    fn the_nearest_live_supervisor_is_found_above_the_panes_that_are_gone() {
+        let (a, b, c, d) = (
+            TerminalId::alloc(),
+            TerminalId::alloc(),
+            TerminalId::alloc(),
+            TerminalId::alloc(),
+        );
+        let mut links = HashMap::new();
+        links.insert(b.clone(), link(&a));
+        links.insert(c.clone(), link(&b));
+        links.insert(d.clone(), link(&c));
+
+        let gone = [b.clone(), c.clone()];
+        let live = |pane: &TerminalId| !gone.contains(pane);
+        assert_eq!(nearest_live_supervisor(&links, &c, live), Some(a.clone()));
+        assert_eq!(nearest_live_supervisor(&links, &b, live), Some(a.clone()));
+        assert_eq!(nearest_live_supervisor(&links, &a, live), Some(a.clone()));
+        assert_eq!(nearest_live_supervisor(&links, &c, |pane| pane == &d), None);
+
+        // A loop in the links ends the walk.
+        links.insert(a.clone(), link(&c));
+        assert_eq!(nearest_live_supervisor(&links, &c, |_| false), None);
     }
 
     #[test]

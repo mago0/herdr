@@ -67,6 +67,13 @@ struct LastSeen {
     had_agent: bool,
 }
 
+/// A pane whose supervisor is gone, and the live supervisor above that it moves to.
+struct Adoption {
+    pane: TerminalId,
+    supervisor: TerminalId,
+    former_pane_id: Option<String>,
+}
+
 pub(crate) struct Orchestration {
     pub(crate) deliveries: DeliveryQueue,
     in_flight: HashMap<TerminalId, InFlight>,
@@ -94,6 +101,9 @@ pub(crate) struct Orchestration {
     pub(crate) client_attached: bool,
     /// Ids of the workspaces Herdr opened as the parent of a worktree and nobody took up yet.
     pub(crate) opened_for_worktrees: std::collections::HashSet<String>,
+    /// True while the server stops. A line queued then waits in the saved file for the next
+    /// server, so it is typed one time.
+    hold_typing: bool,
     store_path: Option<PathBuf>,
     loaded: bool,
     dirty: bool,
@@ -120,6 +130,7 @@ impl Orchestration {
             next_tick: None,
             client_attached: true,
             opened_for_worktrees: std::collections::HashSet::new(),
+            hold_typing: false,
             store_path,
             loaded: false,
             dirty: false,
@@ -412,7 +423,7 @@ impl App {
 
     /// Types the oldest delivery of a terminal when the pane is safe and none is being written.
     fn drain_terminal_deliveries(&mut self, terminal: &TerminalId) -> bool {
-        if self.orchestration.in_flight.contains_key(terminal) {
+        if self.orchestration.hold_typing || self.orchestration.in_flight.contains_key(terminal) {
             return false;
         }
         if !self
@@ -612,6 +623,13 @@ impl App {
                         format!("{target} cannot supervise {}", params.pane_id),
                     );
                 }
+                if params.report.contains(&SuperviseReport::Orphaned) {
+                    return encode_error(
+                        id,
+                        "invalid_report",
+                        "orphaned is sent by the server and cannot be asked for",
+                    );
+                }
                 let mut report = params.report;
                 report.dedup();
                 let link = Supervision { supervisor, report };
@@ -682,7 +700,8 @@ impl App {
         let Some(link) = self.orchestration.links.get(terminal).cloned() else {
             return;
         };
-        if !link.reports(kind) || self.terminal_location(&link.supervisor).is_none() {
+        let asked = kind == SuperviseReport::Orphaned || link.reports(kind);
+        if !asked || self.terminal_location(&link.supervisor).is_none() {
             return;
         }
         let (name, pane_id) = match self.orchestration.last_seen.get(terminal) {
@@ -700,6 +719,7 @@ impl App {
             SuperviseReport::Blocked => &["blocked"],
             SuperviseReport::Stalled => &["stalled"],
             SuperviseReport::Exited => &["blocked", "stalled", "exited"],
+            SuperviseReport::Orphaned => &["orphaned"],
         };
         let heads: Vec<String> = replaced
             .iter()
@@ -724,6 +744,7 @@ impl App {
             SuperviseReport::Blocked => "blocked",
             SuperviseReport::Exited => "exited",
             SuperviseReport::Stalled => "stalled",
+            SuperviseReport::Orphaned => "orphaned",
         };
         let line = supervision::report_line(kind_name, &name, &pane_id, detail);
         let supervisor_pane_id = self
@@ -861,6 +882,8 @@ impl App {
 
     /// Drops state of panes that are gone and reports the ones whose agent went away.
     fn sweep_gone_terminals(&mut self) {
+        // Found before the links of the gone panes are dropped, since the walk goes through them.
+        let adoptions = self.orphan_adoptions();
         let supervised: Vec<TerminalId> = self.orchestration.links.keys().cloned().collect();
         for terminal in supervised {
             let present = self.terminal_location(&terminal).is_some();
@@ -891,6 +914,8 @@ impl App {
                 self.orchestration.dirty = true;
             }
         }
+
+        self.adopt_orphans(adoptions);
 
         let orphaned: Vec<TerminalId> = self
             .orchestration
@@ -934,6 +959,76 @@ impl App {
         let mut activity = std::mem::take(&mut self.orchestration.activity);
         activity.retain(|terminal, _| self.terminal_location(terminal).is_some());
         self.orchestration.activity = activity;
+    }
+
+    /// The live panes whose supervisor is gone and that have a live supervisor above it.
+    fn orphan_adoptions(&self) -> Vec<Adoption> {
+        let live = |terminal: &TerminalId| self.terminal_location(terminal).is_some();
+        let links = &self.orchestration.links;
+        let mut adoptions: Vec<Adoption> = links
+            .iter()
+            .filter(|(pane, link)| live(pane) && !live(&link.supervisor))
+            .filter_map(|(pane, link)| {
+                Some(Adoption {
+                    pane: pane.clone(),
+                    supervisor: supervision::nearest_live_supervisor(
+                        links,
+                        &link.supervisor,
+                        live,
+                    )?,
+                    former_pane_id: self
+                        .orchestration
+                        .last_seen
+                        .get(&link.supervisor)
+                        .map(|seen| seen.pane_id.clone()),
+                })
+            })
+            .collect();
+        adoptions.sort_by_cached_key(|adoption| self.public_pane_id_of_terminal(&adoption.pane));
+        adoptions
+    }
+
+    /// Moves each pane to its new supervisor, with the report kinds of its link, and tells that
+    /// supervisor one time.
+    fn adopt_orphans(&mut self, adoptions: Vec<Adoption>) {
+        for adoption in adoptions {
+            let links = &self.orchestration.links;
+            if supervision::would_cycle(links, &adoption.pane, &adoption.supervisor) {
+                continue;
+            }
+            let Some(link) = self.orchestration.links.get_mut(&adoption.pane) else {
+                continue;
+            };
+            link.supervisor = adoption.supervisor;
+            let reports_blocked = link.reports(SuperviseReport::Blocked);
+            self.orchestration.dirty = true;
+            self.report_to_supervisor(
+                &adoption.pane,
+                SuperviseReport::Orphaned,
+                adoption.former_pane_id.as_deref(),
+            );
+            // The block of a pane that waits now was reported to the supervisor that is gone.
+            let blocked = self
+                .state
+                .terminals
+                .get(&adoption.pane)
+                .is_some_and(|state| state.state == AgentState::Blocked);
+            if blocked && reports_blocked {
+                let blocker = self
+                    .orchestration
+                    .blockers
+                    .get(&adoption.pane)
+                    .and_then(|blocker| blocker.text.clone());
+                self.report_to_supervisor(
+                    &adoption.pane,
+                    SuperviseReport::Blocked,
+                    blocker.as_deref(),
+                );
+            }
+            if let Some((ws_idx, pane_id)) = self.terminal_location(&adoption.pane) {
+                self.emit_pane_updated(ws_idx, pane_id);
+            }
+        }
     }
 
     fn sample_stalls(&mut self, now: Instant) {
@@ -1164,6 +1259,11 @@ impl App {
         for group in self.orchestration.jobs.stop_all() {
             crate::platform::kill_process_group_id(group);
         }
+        // A supervisor that closed since the last tick hands its panes up before the save.
+        self.orchestration.hold_typing = true;
+        let adoptions = self.orphan_adoptions();
+        self.adopt_orphans(adoptions);
+        self.orchestration.hold_typing = false;
         self.save_orchestration_now();
     }
 
@@ -1224,13 +1324,11 @@ impl App {
             if supervision::would_cycle(&self.orchestration.links, &pane, &supervisor) {
                 continue;
             }
-            self.orchestration.links.insert(
-                pane.clone(),
-                Supervision {
-                    supervisor,
-                    report: link.report,
-                },
-            );
+            let mut report = link.report;
+            report.retain(|kind| *kind != SuperviseReport::Orphaned);
+            self.orchestration
+                .links
+                .insert(pane.clone(), Supervision { supervisor, report });
             self.remember_supervised(&pane);
         }
         let now = Instant::now();
