@@ -21,6 +21,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const SETTLE: Duration = Duration::from_millis(200);
 /// The longest a launch waits for a starting shell. After it the launch goes ahead as before.
 const MAX_WAIT: Duration = Duration::from_secs(10);
+/// How long a pane must stay busy before the launch goes ahead and reports it. A starting shell
+/// can look busy for a moment while a startup job runs in its own process group.
+const BUSY_GRACE: Duration = Duration::from_millis(1_500);
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 /// What the connection does after the launch wait.
@@ -158,14 +161,21 @@ fn shell_state(
 #[derive(Default)]
 struct Settle {
     ready_since: Option<(Instant, u64)>,
+    busy_since: Option<Instant>,
 }
 
 impl Settle {
-    /// True when the launch can go ahead: the shell is busy with something else, which the
-    /// launch reports, or it has been ready with no output for [`SETTLE`].
+    /// True when the launch can go ahead: the shell has been busy with something else for
+    /// [`BUSY_GRACE`], which the launch reports, or it has been ready with no output for [`SETTLE`].
     fn observe(&mut self, shell: &PaneShellStateInfo, now: Instant) -> bool {
+        if shell.state != PaneShellState::Busy {
+            self.busy_since = None;
+        }
         match shell.state {
-            PaneShellState::Busy => true,
+            PaneShellState::Busy => {
+                self.ready_since = None;
+                now - *self.busy_since.get_or_insert(now) >= BUSY_GRACE
+            }
             PaneShellState::Starting => {
                 self.ready_since = None;
                 false
@@ -219,8 +229,30 @@ mod tests {
     }
 
     #[test]
-    fn a_busy_pane_goes_ahead_so_the_launch_reports_it() {
+    fn a_pane_that_stays_busy_goes_ahead_so_the_launch_reports_it() {
+        let start = Instant::now();
         let mut settle = Settle::default();
-        assert!(settle.observe(&shell(PaneShellState::Busy, 1), Instant::now()));
+        assert!(!settle.observe(&shell(PaneShellState::Busy, 1), start));
+        assert!(!settle.observe(&shell(PaneShellState::Busy, 1), start + BUSY_GRACE / 2));
+        assert!(settle.observe(&shell(PaneShellState::Busy, 1), start + BUSY_GRACE));
+    }
+
+    #[test]
+    fn a_shell_busy_for_a_moment_during_startup_is_waited_for() {
+        let start = Instant::now();
+        let mut settle = Settle::default();
+        assert!(!settle.observe(&shell(PaneShellState::Starting, 2), start));
+        assert!(!settle.observe(&shell(PaneShellState::Busy, 2), start + SETTLE / 2));
+        assert!(!settle.observe(&shell(PaneShellState::Ready, 8), start + SETTLE));
+        // The busy moment does not count toward a later busy spell.
+        assert!(!settle.observe(&shell(PaneShellState::Busy, 9), start + BUSY_GRACE));
+        assert!(!settle.observe(
+            &shell(PaneShellState::Ready, 10),
+            start + BUSY_GRACE + SETTLE
+        ));
+        assert!(settle.observe(
+            &shell(PaneShellState::Ready, 10),
+            start + BUSY_GRACE + SETTLE * 2
+        ));
     }
 }
