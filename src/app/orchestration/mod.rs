@@ -4,6 +4,7 @@
 pub(crate) mod deliveries;
 pub(crate) mod jobs;
 pub(crate) mod launch;
+pub(crate) mod pause;
 pub(crate) mod stall;
 mod store;
 pub(crate) mod supervision;
@@ -75,6 +76,7 @@ struct Adoption {
 }
 
 pub(crate) struct Orchestration {
+    pauses: pause::PauseJournal,
     pub(crate) deliveries: DeliveryQueue,
     in_flight: HashMap<TerminalId, InFlight>,
     pub(crate) links: HashMap<TerminalId, Supervision>,
@@ -113,6 +115,7 @@ pub(crate) struct Orchestration {
 impl Orchestration {
     pub(crate) fn new(store_path: Option<PathBuf>, stall_after_secs: u32) -> Self {
         Self {
+            pauses: pause::PauseJournal::default(),
             deliveries: DeliveryQueue::default(),
             in_flight: HashMap::new(),
             links: HashMap::new(),
@@ -387,6 +390,7 @@ impl App {
             self.orchestration
                 .deliveries
                 .push(terminal.clone(), text, source, now_ms(), ttl_ms);
+        self.quarantine_subtree_delivery(&delivery);
         self.orchestration.dirty = true;
         self.observe_in_view(Instant::now());
         self.drain_terminal_deliveries(&terminal);
@@ -423,7 +427,11 @@ impl App {
 
     /// Types the oldest delivery of a terminal when the pane is safe and none is being written.
     fn drain_terminal_deliveries(&mut self, terminal: &TerminalId) -> bool {
-        if self.orchestration.hold_typing || self.orchestration.in_flight.contains_key(terminal) {
+        if self.subtree_automation_held(terminal)
+            || self.subtree_delivery_quarantined(terminal)
+            || self.orchestration.hold_typing
+            || self.orchestration.in_flight.contains_key(terminal)
+        {
             return false;
         }
         if !self
@@ -697,6 +705,9 @@ impl App {
         kind: SuperviseReport,
         detail: Option<&str>,
     ) {
+        if self.subtree_automation_held(terminal) {
+            return;
+        }
         let Some(link) = self.orchestration.links.get(terminal).cloned() else {
             return;
         };
@@ -992,6 +1003,9 @@ impl App {
     /// supervisor one time.
     fn adopt_orphans(&mut self, adoptions: Vec<Adoption>) {
         for adoption in adoptions {
+            if self.subtree_terminal_paused(&adoption.pane) {
+                continue;
+            }
             let links = &self.orchestration.links;
             if supervision::would_cycle(links, &adoption.pane, &adoption.supervisor) {
                 continue;
@@ -1100,6 +1114,7 @@ impl App {
             self.orchestration.dirty = true;
             self.emit_delivery_changed(&expired.terminal);
         }
+        self.request_subtree_checkpoints();
         self.sample_stalls(now);
         self.refresh_blockers();
         self.run_due_jobs(now);
@@ -1303,6 +1318,7 @@ impl App {
         let Some(path) = self.orchestration.store_path.clone() else {
             return;
         };
+        self.load_subtree_pauses();
         let stored = store::load(&path);
         let terminal = |app: &App, pane_id: &str| {
             let (ws_idx, pane) = app.parse_pane_id(pane_id)?;
@@ -1561,6 +1577,9 @@ impl App {
     }
 
     fn start_job(&mut self, name: &str, event: Option<TriggerEvent>) {
+        if self.subtree_job_suspended(name) {
+            return;
+        }
         let Some(run) = self.orchestration.jobs.begin(name, event, Instant::now()) else {
             return;
         };
@@ -1596,6 +1615,9 @@ impl App {
             self.terminal_location(terminal).is_none()
         });
         for name in ended {
+            if self.subtree_job_definition_protected(&name) {
+                continue;
+            }
             self.orchestration.jobs.remove(&name);
             self.orchestration.dirty = true;
         }

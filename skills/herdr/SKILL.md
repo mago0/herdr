@@ -253,6 +253,18 @@ herdr job remove ci-watch
 - A job starts at most once a second. Triggers during a run merge into one more run, so a job does not see every event. Use `events read` for that.
 - The command gets `HERDR_JOB_NAME` and `HERDR_JOB_TARGET_PANE_ID`, and for an event `HERDR_JOB_EVENT` and `HERDR_JOB_EVENT_JSON`.
 
+### Pause is not teardown
+
+For fleet subtrees, use fleet's supported `pause`, `pause-status`, explicitly authorized `unpause` and separate `pause-release` operations; see the canonical fleet skill's pause reference. They retain links, ownership and work. Sent requests and `idle`/`done` are not pause confirmations. Do not use `--clear`, pane closure or worktree removal as pause mechanics.
+
+To disable reports manually without detaching a child:
+
+```sh
+herdr pane supervise CHILD --by PARENT --report ''
+```
+
+This alone is not a verified pause: jobs, queued deliveries and autonomous work also require fencing/checkpoints. An older server needs a reported incomplete/manual fallback, not a claim of enforcement.
+
 ### Supervision links
 
 `agent start` run from inside a pane records the calling pane as the new agent's supervisor. It leaves an existing link as it is, and `--no-supervisor` leaves the link out. The link shows as `supervisor_pane_id` on the agent record.

@@ -42,6 +42,7 @@ pub(super) fn command() -> Command {
         .subcommand(tab_command())
         .subcommand(notification_command())
         .subcommand(agent_command())
+        .subcommand(subtree_command())
         .subcommand(job_command())
         .subcommand(events_command())
         .subcommand(pane_command())
@@ -50,6 +51,55 @@ pub(super) fn command() -> Command {
         .subcommand(integration_command())
         .subcommand(plugin_command());
     configure_help(command, 0)
+}
+
+fn subtree_command() -> Command {
+    let mut command =
+        Command::new("subtree").about("Pause, reconcile and explicitly resume an agent subtree");
+    for action in [
+        "pause",
+        "status",
+        "request",
+        "checkpoint",
+        "reconcile",
+        "resume",
+        "release",
+    ] {
+        command = command.subcommand(
+            Command::new(action)
+                .about(match action {
+                    "pause" => "Fence automation and request recursive checkpoints",
+                    "status" => "Inspect confirmed, pending and failed coverage",
+                    "request" => "Retry one unconfirmed checkpoint request",
+                    "checkpoint" => "Record a durable cooperative worker checkpoint",
+                    "reconcile" => "Authorize identity and expected-link recovery",
+                    "resume" => {
+                        "Restore reconciled work and selected jobs with explicit authorization"
+                    }
+                    _ => "Authorize teardown without rearming old automation",
+                })
+                .arg(
+                    option("id", "ID")
+                        .required(true)
+                        .help("Durable pause operation ID"),
+                )
+                .arg(option("target", "AGENT-OR-PANE"))
+                .arg(
+                    option("expected-file", "FILE")
+                        .help("Fleet-owned member and parent expectations for pause"),
+                )
+                .arg(option("evidence", "CHECKPOINT"))
+                .arg(
+                    option("authorization", "TEXT")
+                        .help("Explicit user authorization after reconciliation"),
+                )
+                .arg(
+                    option("restore-jobs", "NAMES")
+                        .help("Comma-separated applicable jobs to restore on resume"),
+                ),
+        );
+    }
+    command
 }
 
 fn configure_help(command: Command, depth: usize) -> Command {

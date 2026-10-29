@@ -1011,7 +1011,13 @@ impl App {
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
 
+        if let Some(error) = self.subtree_request_error(&request) {
+            return error;
+        }
         let response = match request.method {
+            Method::SubtreeControl(params) => {
+                return self.handle_subtree_control(request.id, params)
+            }
             Method::ServerStop(_) => {
                 self.state.should_quit = true;
                 SuccessResponse {

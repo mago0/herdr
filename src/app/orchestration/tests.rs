@@ -2168,3 +2168,6 @@ async fn a_workspace_opened_for_worktrees_keeps_its_mark_across_the_state_file()
     assert_eq!(f.app.orchestration.opened_for_worktrees.len(), 1);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[path = "pause_tests.rs"]
+mod pause_tests;

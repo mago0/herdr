@@ -13,6 +13,7 @@ pub mod plugins;
 pub mod response;
 pub mod server;
 pub mod session;
+pub mod subtrees;
 pub mod tabs;
 pub mod workspaces;
 pub mod worktrees;
@@ -30,6 +31,7 @@ pub use plugins::*;
 pub use response::*;
 pub use server::*;
 pub use session::*;
+pub use subtrees::*;
 pub use tabs::*;
 pub use workspaces::*;
 pub use worktrees::*;
@@ -155,6 +157,8 @@ pub enum Method {
     AgentDeliveries(AgentDeliveriesParams),
     #[serde(rename = "agent.cancel_delivery")]
     AgentCancelDelivery(AgentCancelDeliveryParams),
+    #[serde(rename = "subtree.control")]
+    SubtreeControl(SubtreeControlParams),
     #[serde(rename = "job.add")]
     JobAdd(JobAddParams),
     #[serde(rename = "job.list")]

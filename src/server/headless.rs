@@ -2933,6 +2933,11 @@ impl HeadlessServer {
             return false;
         }
 
+        if let Some(error) = self.app.subtree_request_error(&msg.request) {
+            let _ = msg.respond_to.send(error);
+            return false;
+        }
+
         let frozen_alt_screen_read = match self.alt_screen_read_conflict(&msg.request) {
             AltScreenReadConflict::None => None,
             AltScreenReadConflict::Frozen(snapshot) => Some(snapshot),

@@ -773,6 +773,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::AgentDeliver(_) => "agent.deliver",
         Method::AgentDeliveries(_) => "agent.deliveries",
         Method::AgentCancelDelivery(_) => "agent.cancel_delivery",
+        Method::SubtreeControl(_) => "subtree.control",
         Method::JobAdd(_) => "job.add",
         Method::JobList(_) => "job.list",
         Method::JobRemove(_) => "job.remove",

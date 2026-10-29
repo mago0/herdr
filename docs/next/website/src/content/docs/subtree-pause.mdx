@@ -1,0 +1,38 @@
+---
+title: Subtree pause
+description: Pause agent automation without dismantling hierarchy or ownership.
+---
+
+Pause is not teardown. Fleet coordinates ownership and checkpoint reconciliation; Herdr fences automation. Neither `idle`/`done` nor a submitted request proves work stopped.
+
+```sh
+herdr subtree pause --target PANE --id PAUSE_ID
+herdr subtree status --id PAUSE_ID
+herdr subtree checkpoint --id PAUSE_ID --target PANE --evidence CHECKPOINT_REFERENCE
+herdr subtree request --id PAUSE_ID --target PANE  # deliberately retry an unconfirmed control request
+herdr subtree resume --id PAUSE_ID --authorization 'explicit user decision after reconciliation' --restore-jobs WATCH_NAME
+```
+
+The advertised JavaScript Object Notation (JSON) method is `subtree.control`; `action` selects the operation. Fleet passes `--expected-file` with owned pane/parent/identity expectations. These extend the fence even when actual supervision links are missing. Observed links remain unchanged and are archived separately; verification fails until the expected topology is explicitly reconciled. Use fleet's `pause`, `pause-status` and `unpause` for fleet-owned work. Its authorization file also records ownership and pull request (PR) reconciliation. Native conversation `agent resume` is not subtree resume.
+
+## Guarantees
+
+- A versioned `subtree-pauses.json` beside `orchestration.json` holds snapshots, identities, expected edges, job definitions, delivery archives and checkpoint receipts. Persist the fence before success. Failed writes or an unreadable journal never silently open it.
+- Supervision links and report definitions remain intact; report generation is suppressed. Verification compares every expected edge and checks for unexpected links and identity drift.
+- Interval, event, path and manual job starts are fenced for jobs owned by or targeting protected panes. Definitions remain in place. Already-running jobs may finish; their output is quarantined and prevents confirmation while they run. No application processes are killed.
+- Queued automation cannot start work. Stale lines are archived rather than replayed on resume; mail remains untouched. Checkpoint requests are fixed server-generated text, descendants first, subject to existing busy, dialog and draft-input safety checks. A request with no receipt remains pending; retry it explicitly with `request`.
+- Application programming interface (API) admission rejects protected terminal input, agent launches/resumes, link changes and destructive pane/tab/workspace/worktree operations. The headless server checks before deferred prompt/worktree dispatch too. Opaque command/plugin actions and server stop/handoff are rejected while a subtree fence is active.
+- Server startup consults the journal before automatically restoring native agent sessions. An independently paused descendant stays fenced when a broader pause resumes.
+- Resume requires explicit authorization, confirmed checkpoints, unchanged topology/identity and applicable selected job definitions. Jobs are not recreated, so there are no duplicate watches. Unselected jobs remain suspended. There is no timed resume.
+
+`release` separately authorizes teardown, including an incomplete pause, without calling it confirmed or rearming automation. It is not a resume or a cleanup operation. A released record cannot be resumed. Fleet exposes this as `pause-release` with an empty jobs list; existing release/dirty-worktree rules still govern worker ownership and deletion. Never clear links, release workers or remove resources as a pause mechanism. To disable reports manually without detaching: `herdr pane supervise CHILD --by PARENT --report ''`; this alone does not fence jobs or deliveries.
+
+## Limits and recovery
+
+Checkpoint evidence and user authorization are caller-supplied attestations, not human authentication or a sandbox. Job environment values are preserved in private snapshots, not exposed in receipts. Herdr cannot prove that arbitrary agent-owned background tasks or external schedulers stopped. It cannot retract already-admitted/in-flight input, stop an in-progress tool call safely, or prevent direct host process/pseudoterminal access. Busy, blocked, draft-held or unreachable agents remain unconfirmed, not implicitly paused. Native harness completion queues, including Pi background notifications, are not intercepted by Herdr. Workers must cancel or reconcile them before acknowledging; otherwise coverage remains unconfirmed.
+
+Raw JSON/command-line interface (CLI) calls targeting protected resources are guarded server-side. Commands launched outside the subtree with no ownership/supervision association, external cron jobs and private text user interface (TUI)/terminal attachment input are not an authenticated actor boundary. Fleet also gates dispatch from recorded paused runs/caller panes, including its direct launcher. No claim of host-level sandboxing is made.
+
+Fleet verifies recognized `pr-watch.sh OWNER/REPO NUMBER` watches against GitHub before rearming them. Other job applicability and PR state require the recorded operator reconciliation; Herdr does not query GitHub.
+
+After interruption, inspect status and repeat pause using the same ID. Requested but unconfirmed controls are never blindly replayed. Restore the checkpointed identities/edges or use `herdr subtree reconcile --id ID --target PANE --authorization 'explicit user decision' --evidence CHECKPOINT`, descendants first, before resume. Reconciliation records the previous/current identity and authorization and restores only that pane's expected parent edge. If a lost link has no saved report definition, reports stay off rather than being guessed. Unreadable journals conservatively fence all automated admission and native agent restore, without killing unrelated running processes. Corrupt journals fail closed; retain the file and recover it from the saved control data rather than deleting the gate. A full cold restart can leave saved sessions stopped until explicitly reconciled and resumed. This is intentional, not permission for automatic work.

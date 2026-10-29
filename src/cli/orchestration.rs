@@ -403,6 +403,61 @@ pub(super) fn run_events_command(args: &[String]) -> std::io::Result<i32> {
     }
 }
 
+pub(super) fn run_subtree_command(args: &[String]) -> std::io::Result<i32> {
+    const USAGE: &str = "usage: herdr subtree <pause|status|request|checkpoint|reconcile|resume|release> --id ID [--target AGENT_OR_PANE] [--evidence CHECKPOINT] [--authorization TEXT] [--restore-jobs NAME,...] [--expected-file FILE]";
+    let Some(action) = args.first().filter(|s| {
+        matches!(
+            s.as_str(),
+            "pause" | "status" | "request" | "checkpoint" | "reconcile" | "resume" | "release"
+        )
+    }) else {
+        return usage_error(USAGE.into());
+    };
+    let mut params = crate::api::schema::SubtreeControlParams {
+        expected: Vec::new(),
+        action: action.clone(),
+        target: None,
+        pause_id: None,
+        evidence: None,
+        authorization: None,
+        restore_jobs: Vec::new(),
+    };
+    let mut index = 1;
+    while index < args.len() {
+        let value = match value_of(args, index, &args[index]) {
+            Ok(v) => v.clone(),
+            Err(e) => return usage_error(e),
+        };
+        match args[index].as_str() {
+            "--expected-file" => {
+                params.expected = match std::fs::read(&value)
+                    .map_err(|e| e.to_string())
+                    .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| e.to_string()))
+                {
+                    Ok(expected) => expected,
+                    Err(error) => {
+                        return usage_error(format!("invalid expected ownership file: {error}"))
+                    }
+                };
+            }
+            "--id" => params.pause_id = Some(value),
+            "--target" => params.target = Some(value),
+            "--evidence" => params.evidence = Some(value),
+            "--authorization" => params.authorization = Some(value),
+            "--restore-jobs" => {
+                params.restore_jobs = value
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            }
+            _ => return usage_error(USAGE.into()),
+        }
+        index += 2;
+    }
+    send("cli:subtree:control", Method::SubtreeControl(params))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

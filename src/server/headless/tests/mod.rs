@@ -8333,3 +8333,43 @@ fn no_handle_internal_event_bypass_in_module() {
         bypass_lines.join("\n  ")
     );
 }
+
+#[tokio::test]
+async fn subtree_pause_guards_headless_deferred_prompt_and_worktree_paths() {
+    let mut server = test_headless_server();
+    server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("protected")];
+    server.app.state.ensure_test_terminals();
+    server.app.state.active = Some(0);
+    let root = server.app.state.workspaces[0].tabs[0].root_pane;
+    let pane = server.app.public_pane_id(0, root).unwrap();
+    let workspace = server.app.public_workspace_id(0);
+    let pause:api::schema::Request=serde_json::from_value(serde_json::json!({"id":"pause","method":"subtree.control","params":{"action":"pause","pause_id":"headless","target":pane}})).unwrap();
+    let out = server.app.handle_api_request(pause);
+    assert!(
+        serde_json::from_str::<api::schema::SuccessResponse>(&out).is_ok(),
+        "{out}"
+    );
+    for (method, params) in [
+        (
+            "agent.prompt",
+            serde_json::json!({"target":pane,"text":"must not start"}),
+        ),
+        (
+            "worktree.remove",
+            serde_json::json!({"workspace_id":workspace,"force":true}),
+        ),
+    ] {
+        let (respond_to, rx) = std::sync::mpsc::channel();
+        server.handle_api_request_with_shutdown_check(api::ApiRequestMessage {
+            request: serde_json::from_value(
+                serde_json::json!({"id":"headless","method":method,"params":params}),
+            )
+            .unwrap(),
+            respond_to,
+            response_write_complete: None,
+        });
+        let out: api::schema::ErrorResponse = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+        assert_eq!(out.error.code, "subtree_paused", "{method}");
+    }
+    assert_eq!(server.app.state.workspaces.len(), 1);
+}

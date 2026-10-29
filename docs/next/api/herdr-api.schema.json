@@ -2510,6 +2510,40 @@
           ],
           "type": "object"
         },
+        "ExpectedSubtreeMember": {
+          "properties": {
+            "agent": {
+              "default": null,
+              "description": "Recorded fleet worker name, not the agent kind.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "session": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/AgentSessionSpec"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "supervisor_pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "supervisor_pane_id"
+          ],
+          "type": "object"
+        },
         "IntegrationInstallParams": {
           "properties": {
             "target": {
@@ -4768,6 +4802,64 @@
             }
           ]
         },
+        "SubtreeControlParams": {
+          "properties": {
+            "action": {
+              "description": "pause, status, request, checkpoint, reconcile, resume or release.",
+              "type": "string"
+            },
+            "authorization": {
+              "default": null,
+              "description": "Recorded operator authorization for resume/release; never supplied by a timer.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "evidence": {
+              "default": null,
+              "description": "A durable checkpoint reference, attesting owned autonomous work and wakes stopped.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "expected": {
+              "default": [],
+              "description": "Fleet-owned members/edges that must be fenced even if a supervision link was lost.",
+              "items": {
+                "$ref": "#/schemas/request/$defs/ExpectedSubtreeMember"
+              },
+              "type": "array"
+            },
+            "pause_id": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "restore_jobs": {
+              "default": [],
+              "description": "Only these saved jobs may run again after reconciliation.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "target": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "type": "object"
+        },
         "SuperviseReport": {
           "enum": [
             "blocked",
@@ -6012,6 +6104,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentCancelDeliveryParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "subtree.control",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/SubtreeControlParams"
             }
           },
           "required": [
@@ -10236,6 +10344,20 @@
         },
         "ResponseResult": {
           "oneOf": [
+            {
+              "properties": {
+                "pause": true,
+                "type": {
+                  "const": "subtree_control",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "pause"
+              ],
+              "type": "object"
+            },
             {
               "properties": {
                 "capabilities": {

@@ -39,6 +39,7 @@ struct RestoreRuntimeContext<'a> {
     scrollback_limit_bytes: usize,
     shell_config: crate::pane::PaneShellConfig<'a>,
     resume_agents_on_restore: bool,
+    pause_fence: &'a crate::app::orchestration::pause::RestoreFence,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
@@ -281,11 +282,15 @@ fn restore_with_imports_and_failures(
     let mut terminal_runtimes = HashMap::new();
     let mut resumed_agent_sessions = HashSet::new();
     let mut failed_imports = 0;
+    let pause_fence = crate::app::orchestration::pause::RestoreFence::load(
+        &crate::session::data_dir().join("subtree-pauses.json"),
+    );
     for (idx, ws_snap) in snapshot.workspaces.iter().enumerate() {
         let runtime_context = RestoreRuntimeContext {
             scrollback_limit_bytes,
             shell_config,
             resume_agents_on_restore,
+            pause_fence: &pause_fence,
             events: events.clone(),
             render_notify: render_notify.clone(),
             render_dirty: render_dirty.clone(),
@@ -542,9 +547,14 @@ fn restore_tab(
         let saved_agent_resume = saved_pane.and_then(saved_reported_resume);
         let saved_history =
             old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
+        let old_pane_id = reverse_id_map.get(id).copied();
+        let public_pane_id = old_pane_id
+            .and_then(|old_id| public_pane_ids_by_old_raw.get(&old_id))
+            .map(String::as_str);
         let startup = {
             let mut agent_restore = AgentRestoreState {
-                enabled: runtime_context.resume_agents_on_restore,
+                enabled: runtime_context.resume_agents_on_restore
+                    && !runtime_context.pause_fence.holds(public_pane_id),
                 resumed_sessions: resumed_agent_sessions,
             };
             pane_restore_startup(
@@ -565,10 +575,6 @@ fn restore_tab(
             .as_ref()
             .and_then(|plan| crate::detect::parse_agent_label(&plan.agent));
 
-        let old_pane_id = reverse_id_map.get(id).copied();
-        let public_pane_id = old_pane_id
-            .and_then(|old_id| public_pane_ids_by_old_raw.get(&old_id))
-            .map(String::as_str);
         let launch_env = public_pane_id
             .map(|pane_id| {
                 PaneLaunchEnv::from_extra(Vec::new()).with_identity(
